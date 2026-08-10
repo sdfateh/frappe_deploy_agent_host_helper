@@ -80,6 +80,7 @@ done
 [[ -d /run/systemd/system ]] || fail "systemd is not running on this server"
 systemctl is-active --quiet docker.service || fail "docker.service must be active"
 docker compose version >/dev/null 2>&1 || fail "the Docker Compose plugin is required"
+python3 -m pip --version >/dev/null 2>&1 || fail "python3-pip is required"
 
 source_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 [[ -f "${config_source}" && ! -L "${config_source}" ]] || fail "configuration must be a regular file, not a symlink"
@@ -127,9 +128,11 @@ if [[ ! -d "${release_path}" ]]; then
             "${source_root}/${source_name}" "${release_staging}/host_helper/${source_name}"
     done
     install -o root -g root -m 0644 "${source_root}/requirements.txt" "${release_staging}/requirements.txt"
-    python3 -m venv "${release_staging}/.venv"
-    "${release_staging}/.venv/bin/python" -m pip install \
+    python3 -m venv --without-pip "${release_staging}/.venv"
+    site_packages="$("${release_staging}/.venv/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
+    python3 -m pip install \
         --disable-pip-version-check --no-cache-dir \
+        --target "${site_packages}" \
         --requirement "${release_staging}/requirements.txt"
     "${release_staging}/.venv/bin/python" -c \
         'from host_helper.protocol import HelperConfig; from host_helper.server import main'

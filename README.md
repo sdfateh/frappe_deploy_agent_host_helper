@@ -9,7 +9,7 @@ paths, or database root passwords.
 ## Requirements
 
 - Linux with systemd
-- Python 3.10 or newer, including the `venv` module
+- Python 3.10 or newer with the `venv` module and `python3-pip`
 - Docker Engine with the `docker compose` plugin
 - A completed helper policy based on `host-helper.example.json`
 - One root-owned mode-`0600` MariaDB password file for each configured Bench
