@@ -480,7 +480,7 @@ def execute(
         return _data_update_result(values, result.stdout)
 
     if operation.name == "restore_companion_assets":
-        payload = json.dumps({**values, "sites_path": str(policy.sites_path)}, separators=(",", ":"))
+        payload = json.dumps({**values, "sites_path": str(policy.container_sites_path)}, separators=(",", ":"))
         run_fixed(
             _compose_command(policy, ["python", "-c", _COMPANION_SCRIPT]),
             config,

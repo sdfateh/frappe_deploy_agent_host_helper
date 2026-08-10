@@ -26,6 +26,15 @@ staging directory, database password file, domain suffixes, allowed operations,
 and the UID used by the Agent containers. The default container UID is `10001`.
 Do not install the example policy unchanged.
 
+`sites_path` is validated on the host and must be a real, existing directory
+there. `container_sites_path` is the absolute path where that same bench's
+sites directory appears *inside* the backend container (for example
+`/home/frappe/frappe-bench/sites`); it is only used when invoking commands
+through `docker compose exec` and is not checked against the host filesystem.
+The two may differ, for instance when the sites data lives in a Docker-managed
+named volume rather than a host bind mount: point `sites_path` at the volume's
+real host location and `container_sites_path` at its in-container mount point.
+
 ## Install or upgrade
 
 Clone or extract a reviewed release, prepare the policy and password files, and

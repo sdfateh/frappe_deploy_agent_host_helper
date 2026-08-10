@@ -132,6 +132,7 @@ class HelperBenchPolicy:
     compose_file: Path
     backend_service: str
     sites_path: Path
+    container_sites_path: Path
     host_staging_path: Path
     container_staging_path: Path
     db_root_password_file: Path
@@ -144,10 +145,10 @@ class HelperBenchPolicy:
     @classmethod
     def from_mapping(cls, value: Any) -> "HelperBenchPolicy":
         expected = {
-            "bench_id", "compose_file", "backend_service", "sites_path", "host_staging_path",
-            "container_staging_path", "db_root_password_file", "allowed_site_suffixes",
-            "allowed_operations", "allowed_site_config_keys", "concurrency_limit",
-            "allowed_data_update_policies",
+            "bench_id", "compose_file", "backend_service", "sites_path", "container_sites_path",
+            "host_staging_path", "container_staging_path", "db_root_password_file",
+            "allowed_site_suffixes", "allowed_operations", "allowed_site_config_keys",
+            "concurrency_limit", "allowed_data_update_policies",
         }
         required = expected - {
             "allowed_site_config_keys", "allowed_data_update_policies", "concurrency_limit"
@@ -162,6 +163,7 @@ class HelperBenchPolicy:
             raise RequestRejected("invalid backend service")
         compose_file = _absolute_path(value.get("compose_file"), "compose_file")
         sites_path = _absolute_path(value.get("sites_path"), "sites_path")
+        container_sites = _absolute_path(value.get("container_sites_path"), "container_sites_path", must_exist=False)
         host_staging = _absolute_path(value.get("host_staging_path"), "host_staging_path")
         container_staging = _absolute_path(value.get("container_staging_path"), "container_staging_path", must_exist=False)
         secret = _absolute_path(value.get("db_root_password_file"), "db_root_password_file")
@@ -195,7 +197,8 @@ class HelperBenchPolicy:
             )
         return cls(
             bench_id=bench_id, compose_file=compose_file, backend_service=backend,
-            sites_path=sites_path, host_staging_path=host_staging,
+            sites_path=sites_path, container_sites_path=container_sites,
+            host_staging_path=host_staging,
             container_staging_path=container_staging, db_root_password_file=secret,
             allowed_site_suffixes=_suffixes(value.get("allowed_site_suffixes")),
             allowed_operations=frozenset(raw_operations),
