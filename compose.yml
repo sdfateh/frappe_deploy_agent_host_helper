@@ -2,7 +2,7 @@
 # the API and Worker roles with different commands.
 services:
   frappe-deploy-agent:
-    image: "${AGENT_IMAGE_REPOSITORY:-kaleam/frappe-deploy-agent}@sha256:${AGENT_IMAGE_DIGEST_HEX:?AGENT_IMAGE_DIGEST_HEX must be set}"
+    image: "${AGENT_IMAGE_REPOSITORY:-kaleam/frappe-deploy-agent}:${AGENT_IMAGE_TAG:-latest}"
     container_name: frappe-deploy-agent
     command: ["uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000", "--workers", "1"]
     restart: unless-stopped
@@ -13,7 +13,9 @@ services:
     pids_limit: 256
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
-    networks: [edge, state]
+    # bench: shared with the dev-erp3 stack so the controller (installed on
+    # that site) is reachable by container hostname with no public traffic.
+    networks: [edge, state, bench]
     environment:
       CF_API_TOKEN: ${CF_API_TOKEN}
       CF_ZONE_ID: ${CF_ZONE_ID}
@@ -47,10 +49,10 @@ services:
       OUTBOUND_CONTROLLER_ENABLED: "true"
       AGENT_ID: ${AGENT_ID:?AGENT_ID must be set}
       CONTROLLER_AUDIENCE: ${CONTROLLER_AUDIENCE:-frappe-controller}
+      # Plain HTTP by container hostname only. No certificate: the controller
+      # must be reachable exclusively over an isolated, non-public network.
       CONTROLLER_URL: ${CONTROLLER_URL:?CONTROLLER_URL must be set}
-      CONTROLLER_CA_CERTIFICATE: /run/secrets/controller-ca.pem
-      CONTROLLER_CLIENT_CERTIFICATE: /run/secrets/agent-cert.pem
-      CONTROLLER_CLIENT_PRIVATE_KEY: /run/secrets/agent-key.pem
+      CONTROLLER_SITE_NAME: ${CONTROLLER_SITE_NAME:-}
       CONTROLLER_ALLOWED_OPERATIONS: '${CONTROLLER_ALLOWED_OPERATIONS:-["site.create","site.create_blank","site.create_from_backup","site.backup","site.restore","site.reinstall","site.delete","site.migrate","site.scheduler.enable","site.scheduler.disable","site.maintenance.enable","site.maintenance.disable","site.config.update","data.update","data.update.break_glass","operation.cancel"]}'
       CONTROLLER_POLL_INTERVAL_SECONDS: ${CONTROLLER_POLL_INTERVAL_SECONDS:-5}
       CONTROLLER_REQUEST_TIMEOUT_SECONDS: ${CONTROLLER_REQUEST_TIMEOUT_SECONDS:-30}
@@ -68,9 +70,6 @@ services:
       - ${DATA_UPDATE_POLICY_FILE:-/dev/null}:/etc/frappe-agent/data-update-policies.json:ro
       - ${BENCH_STAGING_ROOT:?BENCH_STAGING_ROOT must be set}:${BENCH_STAGING_ROOT}
       - ${BENCH_SITES_ROOT:?BENCH_SITES_ROOT must be set}:${BENCH_SITES_ROOT}:ro
-      - ${CONTROLLER_CA_CERTIFICATE:?CONTROLLER_CA_CERTIFICATE must be set}:/run/secrets/controller-ca.pem:ro
-      - ${CONTROLLER_CLIENT_CERTIFICATE:?CONTROLLER_CLIENT_CERTIFICATE must be set}:/run/secrets/agent-cert.pem:ro
-      - ${CONTROLLER_CLIENT_PRIVATE_KEY:?CONTROLLER_CLIENT_PRIVATE_KEY must be set}:/run/secrets/agent-key.pem:ro
       - ${TRAEFIK_DYNAMIC_CONFIG_PATH}:${TRAEFIK_DYNAMIC_CONFIG_PATH}
       - ${STAGING_DIR}:${STAGING_DIR}
       - agent_data:/app/data
@@ -87,7 +86,7 @@ services:
       options: {max-size: 10m, max-file: "3"}
 
   frappe-operation-worker:
-    image: "${AGENT_IMAGE_REPOSITORY:-kaleam/frappe-deploy-agent}@sha256:${AGENT_IMAGE_DIGEST_HEX:?AGENT_IMAGE_DIGEST_HEX must be set}"
+    image: "${AGENT_IMAGE_REPOSITORY:-kaleam/frappe-deploy-agent}:${AGENT_IMAGE_TAG:-latest}"
     container_name: frappe-operation-worker
     command: ["python", "worker.py"]
     restart: unless-stopped
@@ -98,7 +97,9 @@ services:
     pids_limit: 256
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
-    networks: [edge, state]
+    # bench: shared with the dev-erp3 stack so the controller (installed on
+    # that site) is reachable by container hostname with no public traffic.
+    networks: [edge, state, bench]
     environment:
       CF_API_TOKEN: ${CF_API_TOKEN}
       CF_ZONE_ID: ${CF_ZONE_ID}
@@ -175,6 +176,12 @@ networks:
   edge: {}
   state:
     internal: true
+  # dev-erp3's own internal_network, joined here by its Compose-generated
+  # name (<project>_<network>). Adjust BENCH_DOCKER_NETWORK if the bench's
+  # compose project name ever changes.
+  bench:
+    name: ${BENCH_DOCKER_NETWORK:-dev-erp3_internal_network}
+    external: true
 
 volumes:
   redis_data: {}
