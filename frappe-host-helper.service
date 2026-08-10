@@ -1,0 +1,32 @@
+[Unit]
+Description=Frappe Deploy Agent typed host helper
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+RuntimeDirectory=frappe-agent
+RuntimeDirectoryMode=0750
+ExecStart=/opt/frappe-host-helper/current/.venv/bin/python -m host_helper.server --config /etc/frappe-deploy-agent/host-helper.json
+WorkingDirectory=/opt/frappe-host-helper/current
+Restart=on-failure
+RestartSec=5s
+UMask=0117
+NoNewPrivileges=true
+PrivateDevices=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/run/frappe-agent
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,42 @@
+{
+  "benches": [
+    {
+      "bench_id": "production-a",
+      "compose_file": "/srv/frappe/production-a/compose.yml",
+      "backend_service": "backend",
+      "sites_path": "/srv/frappe/production-a/sites",
+      "host_staging_path": "/srv/frappe-staging/production-a",
+      "container_staging_path": "/srv/frappe-staging/production-a",
+      "db_root_password_file": "/etc/frappe-deploy-agent/secrets/production-a-db-root",
+      "allowed_site_suffixes": ["erp.example.com"],
+      "allowed_operations": ["site.create", "site.create_blank", "site.create_from_backup", "site.backup", "site.restore", "site.reinstall", "site.delete", "site.migrate", "site.scheduler.enable", "site.scheduler.disable", "site.maintenance.enable", "site.maintenance.disable", "site.config.update", "site.verify", "data.update", "data.update.break_glass"],
+      "allowed_site_config_keys": [],
+      "allowed_data_update_policies": [
+        {"policy_id": "customer-status.standard.v1", "operation": "data.update"},
+        {"policy_id": "customer-status.break-glass.v1", "operation": "data.update.break_glass"}
+      ],
+      "concurrency_limit": 1
+    },
+    {
+      "bench_id": "production-b",
+      "compose_file": "/srv/frappe/production-b/compose.yml",
+      "backend_service": "backend",
+      "sites_path": "/srv/frappe/production-b/sites",
+      "host_staging_path": "/srv/frappe-staging/production-b",
+      "container_staging_path": "/srv/frappe-staging/production-b",
+      "db_root_password_file": "/etc/frappe-deploy-agent/secrets/production-b-db-root",
+      "allowed_site_suffixes": ["customer.example.net"],
+      "allowed_operations": ["site.create", "site.create_blank", "site.create_from_backup", "site.backup", "site.restore", "site.reinstall", "site.delete", "site.migrate", "site.scheduler.enable", "site.scheduler.disable", "site.maintenance.enable", "site.maintenance.disable", "site.config.update", "site.verify", "data.update"],
+      "allowed_site_config_keys": [],
+      "allowed_data_update_policies": [
+        {"policy_id": "customer-status.standard.v1", "operation": "data.update"}
+      ],
+      "concurrency_limit": 1
+    }
+  ],
+  "allowed_uids": [10001],
+  "socket_path": "/run/frappe-agent/helper.sock",
+  "socket_group": "frappe-agent",
+  "timeout_seconds": 1800,
+  "output_limit_bytes": 262144
+}
