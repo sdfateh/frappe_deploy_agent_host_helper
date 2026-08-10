@@ -222,7 +222,9 @@ config_temporary="${CONFIG_TARGET}.new.$$"
 install -o root -g root -m 0600 "${config_source}" "${config_temporary}"
 [[ ! -L "${CONFIG_TARGET}" ]] || fail "refusing to replace a symlinked configuration target"
 
-"${release_path}/.venv/bin/python" - "${config_temporary}" "${agent_uid}" "${SOCKET_GROUP}" "${SOCKET_PATH}" <<'PY'
+(
+    cd -- "${release_path}"
+    .venv/bin/python - "${config_temporary}" "${agent_uid}" "${SOCKET_GROUP}" "${SOCKET_PATH}" <<'PY'
 import os
 import stat
 import sys
@@ -245,6 +247,7 @@ for bench in config.benches:
         )
 print(f"validated {len(config.benches)} bench policy entr{'y' if len(config.benches) == 1 else 'ies'}")
 PY
+)
 
 if [[ -e "${CONFIG_TARGET}" ]] && ! cmp -s "${CONFIG_TARGET}" "${config_temporary}"; then
     install -o root -g root -m 0600 "${CONFIG_TARGET}" "${CONFIG_TARGET}.previous"
