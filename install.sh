@@ -205,12 +205,15 @@ if [[ ! -d "${release_path}" ]]; then
     install -o root -g root -m 0644 "${source_root}/requirements.txt" "${release_staging}/requirements.txt"
     python3 -m venv --without-pip "${release_staging}/.venv"
     site_packages="$("${release_staging}/.venv/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
-    python3 -m pip install \
+    PIP_ROOT_USER_ACTION=ignore python3 -m pip install \
         --disable-pip-version-check --no-cache-dir \
         --target "${site_packages}" \
         --requirement "${release_staging}/requirements.txt"
-    "${release_staging}/.venv/bin/python" -c \
-        'from host_helper.protocol import HelperConfig; from host_helper.server import main'
+    (
+        cd -- "${release_staging}"
+        .venv/bin/python -c \
+            'from host_helper.protocol import HelperConfig; from host_helper.server import main'
+    )
     mv -- "${release_staging}" "${release_path}"
     release_staging=""
 fi
