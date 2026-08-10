@@ -1,6 +1,6 @@
 [project]
 name = "frappe-host-helper"
-version = "0.1.0"
+version = "0.2.0"
 description = "Root-owned typed host helper for Frappe Deploy Agent"
 readme = "README.md"
 requires-python = ">=3.10"

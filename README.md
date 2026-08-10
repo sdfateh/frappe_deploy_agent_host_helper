@@ -6,6 +6,11 @@ invoke `docker compose exec`. The Agent API and Operation Worker receive only
 its Unix socket; they do not receive the Docker socket, Docker CLI, Compose
 paths, or database root passwords.
 
+This repository also carries the hardened `compose.yml` and `.env.example` for
+the per-server Deploy Agent API, Operation Worker, and Redis. One reviewed Git
+checkout can therefore install the host service and the complete container
+stack on a managed server. It does not contain either Frappe custom app.
+
 ## Requirements
 
 - Linux with systemd
@@ -13,6 +18,8 @@ paths, or database root passwords.
 - Docker Engine with the `docker compose` plugin
 - A completed helper policy based on `host-helper.example.json`
 - One root-owned mode-`0600` MariaDB password file for each configured Bench
+- A completed Agent environment based on `.env.example` when starting Docker
+- A pushed, scanned Agent image digest referenced by that environment
 
 The policy must contain the real, existing Compose file, sites directory,
 staging directory, database password file, domain suffixes, allowed operations,
@@ -27,6 +34,22 @@ run the installer with sudo:
 ```console
 sudo ./install.sh --config /root/host-helper.production.json
 ```
+
+That command installs and starts the Host Helper and installs the Docker Compose
+assets without starting containers. To validate, install, and start the full
+per-server stack in the same operation:
+
+```console
+sudo ./install.sh \
+  --config /root/host-helper.production.json \
+  --agent-env /root/frappe-agent.production.env \
+  --start-agent
+```
+
+The completed Agent environment may keep `FRAPPE_HOST_HELPER_GID=auto`; the
+installer replaces it with the server's actual socket-group GID before Compose
+validation. The environment must reference an immutable registry digest, not a
+mutable image tag.
 
 If the Agent containers use a different UID:
 
@@ -47,8 +70,11 @@ The installer is idempotent. It:
 6. checks every configured database password file is root-owned and mode
    `0600`;
 7. atomically points `/opt/frappe-host-helper/current` at the release;
-8. enables and restarts `frappe-host-helper.service`; and
-9. prints the `FRAPPE_HOST_HELPER_GID` required by Compose.
+8. installs the hardened Compose file and protected environment template;
+9. optionally validates and atomically installs the completed Agent environment;
+10. enables and restarts `frappe-host-helper.service`; and
+11. with `--start-agent`, pulls and starts Agent, Worker, and Redis and waits for
+    their health checks.
 
 When replacing a different policy, the installer preserves the previous policy
 as `/etc/frappe-deploy-agent/host-helper.json.previous`.
@@ -66,6 +92,13 @@ as `/etc/frappe-deploy-agent/host-helper.json.previous`.
 /etc/frappe-deploy-agent/
 ├── host-helper.json
 └── secrets/
+
+/opt/frappe-deploy-agent/
+└── compose.yml
+
+/etc/frappe-agent/
+├── agent.env
+└── agent.env.example
 
 /etc/systemd/system/frappe-host-helper.service
 /run/frappe-agent/helper.sock
@@ -115,6 +148,10 @@ sensitive command values are redacted from logs.
 sudo systemctl status frappe-host-helper
 sudo journalctl -u frappe-host-helper
 sudo systemctl restart frappe-host-helper
+sudo docker compose \
+  --env-file /etc/frappe-agent/agent.env \
+  --file /opt/frappe-deploy-agent/compose.yml \
+  ps
 ```
 
 Upgrade the Host Helper together with its matching Deploy Agent release. Keep

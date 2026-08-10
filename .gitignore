@@ -9,3 +9,9 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+.env
+agent.env
+host-helper.json
+benches.yaml
+*.pem
+*.key

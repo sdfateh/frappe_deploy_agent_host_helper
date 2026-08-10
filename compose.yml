@@ -1,0 +1,181 @@
+# Hardened per-server Agent stack. The same signed runtime image is used for
+# the API and Worker roles with different commands.
+services:
+  frappe-deploy-agent:
+    image: "${AGENT_IMAGE_REPOSITORY:-kaleam/frappe-deploy-agent}@sha256:${AGENT_IMAGE_DIGEST_HEX:?AGENT_IMAGE_DIGEST_HEX must be set}"
+    container_name: frappe-deploy-agent
+    command: ["uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000", "--workers", "1"]
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    networks: [edge, state]
+    environment:
+      CF_API_TOKEN: ${CF_API_TOKEN}
+      CF_ZONE_ID: ${CF_ZONE_ID}
+      SERVER_IP: ${SERVER_IP}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ALLOWED_BUCKETS: ${S3_ALLOWED_BUCKETS}
+      S3_ALLOWED_PREFIXES: ${S3_ALLOWED_PREFIXES}
+      S3_MAX_OBJECT_BYTES: ${S3_MAX_OBJECT_BYTES:-21474836480}
+      S3_MAX_RESTORE_BYTES: ${S3_MAX_RESTORE_BYTES:-42949672960}
+      S3_REQUIRE_CHECKSUM: "true"
+      FRAPPE_HOST_HELPER_SOCKET: /run/frappe-agent/helper.sock
+      BENCH_COMMAND_TIMEOUT_SECONDS: ${BENCH_COMMAND_TIMEOUT_SECONDS:-1800}
+      BENCH_REGISTRY_PATH: /etc/frappe-agent/benches.yaml
+      BENCH_REGISTRY_REQUIRE_EXISTING_PATHS: "false"
+      INVENTORY_DATABASE_PATH: /app/data/inventory.db
+      INVENTORY_RECONCILE_INTERVAL_SECONDS: ${INVENTORY_RECONCILE_INTERVAL_SECONDS:-300}
+      OPERATION_DATABASE_PATH: /app/data/operations.db
+      OPERATION_DEFAULT_MAX_ATTEMPTS: ${OPERATION_DEFAULT_MAX_ATTEMPTS:-3}
+      OPERATION_EVENT_BATCH_SIZE: ${OPERATION_EVENT_BATCH_SIZE:-20}
+      OPERATION_RESULT_BATCH_SIZE: ${OPERATION_RESULT_BATCH_SIZE:-50}
+      DATA_UPDATE_POLICY_PATH: ${DATA_UPDATE_POLICY_PATH:-}
+      TRAEFIK_DYNAMIC_CONFIG_PATH: ${TRAEFIK_DYNAMIC_CONFIG_PATH}
+      TRAEFIK_FRONTEND_SERVICE: ${TRAEFIK_FRONTEND_SERVICE}
+      STAGING_DIR: ${STAGING_DIR}
+      STAGING_MAX_AGE_HOURS: ${STAGING_MAX_AGE_HOURS:-24}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      OUTBOUND_CONTROLLER_ENABLED: "true"
+      AGENT_ID: ${AGENT_ID:?AGENT_ID must be set}
+      CONTROLLER_AUDIENCE: ${CONTROLLER_AUDIENCE:-frappe-controller}
+      CONTROLLER_URL: ${CONTROLLER_URL:?CONTROLLER_URL must be set}
+      CONTROLLER_CA_CERTIFICATE: /run/secrets/controller-ca.pem
+      CONTROLLER_CLIENT_CERTIFICATE: /run/secrets/agent-cert.pem
+      CONTROLLER_CLIENT_PRIVATE_KEY: /run/secrets/agent-key.pem
+      CONTROLLER_ALLOWED_OPERATIONS: '${CONTROLLER_ALLOWED_OPERATIONS:-["site.create","site.create_blank","site.create_from_backup","site.backup","site.restore","site.reinstall","site.delete","site.migrate","site.scheduler.enable","site.scheduler.disable","site.maintenance.enable","site.maintenance.disable","site.config.update","data.update","data.update.break_glass","operation.cancel"]}'
+      CONTROLLER_POLL_INTERVAL_SECONDS: ${CONTROLLER_POLL_INTERVAL_SECONDS:-5}
+      CONTROLLER_REQUEST_TIMEOUT_SECONDS: ${CONTROLLER_REQUEST_TIMEOUT_SECONDS:-30}
+      API_KEY: ${API_KEY:?API_KEY must be set}
+      ALLOWED_ORIGINS: '[]'
+      SQLITE_PATH: /app/data/agent.db
+      IP_ALLOWLIST_BOOTSTRAP: '["127.0.0.1/32"]'
+      TRUSTED_PROXY_NETWORKS: '[]'
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - /run/frappe-agent/helper.sock:/run/frappe-agent/helper.sock
+      - ${BENCH_REGISTRY_FILE:?BENCH_REGISTRY_FILE must be set}:/etc/frappe-agent/benches.yaml:ro
+      - ${DATA_UPDATE_POLICY_FILE:-/dev/null}:/etc/frappe-agent/data-update-policies.json:ro
+      - ${BENCH_STAGING_ROOT:?BENCH_STAGING_ROOT must be set}:${BENCH_STAGING_ROOT}
+      - ${BENCH_SITES_ROOT:?BENCH_SITES_ROOT must be set}:${BENCH_SITES_ROOT}:ro
+      - ${CONTROLLER_CA_CERTIFICATE:?CONTROLLER_CA_CERTIFICATE must be set}:/run/secrets/controller-ca.pem:ro
+      - ${CONTROLLER_CLIENT_CERTIFICATE:?CONTROLLER_CLIENT_CERTIFICATE must be set}:/run/secrets/agent-cert.pem:ro
+      - ${CONTROLLER_CLIENT_PRIVATE_KEY:?CONTROLLER_CLIENT_PRIVATE_KEY must be set}:/run/secrets/agent-key.pem:ro
+      - ${TRAEFIK_DYNAMIC_CONFIG_PATH}:${TRAEFIK_DYNAMIC_CONFIG_PATH}
+      - ${STAGING_DIR}:${STAGING_DIR}
+      - agent_data:/app/data
+    group_add:
+      - "${FRAPPE_HOST_HELPER_GID:?FRAPPE_HOST_HELPER_GID must be set}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; request = urllib.request.Request('http://127.0.0.1:8000/ready', headers={'X-API-Key': os.environ['API_KEY']}); urllib.request.urlopen(request)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  frappe-operation-worker:
+    image: "${AGENT_IMAGE_REPOSITORY:-kaleam/frappe-deploy-agent}@sha256:${AGENT_IMAGE_DIGEST_HEX:?AGENT_IMAGE_DIGEST_HEX must be set}"
+    container_name: frappe-operation-worker
+    command: ["python", "worker.py"]
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    networks: [edge, state]
+    environment:
+      CF_API_TOKEN: ${CF_API_TOKEN}
+      CF_ZONE_ID: ${CF_ZONE_ID}
+      SERVER_IP: ${SERVER_IP}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ALLOWED_BUCKETS: ${S3_ALLOWED_BUCKETS}
+      S3_ALLOWED_PREFIXES: ${S3_ALLOWED_PREFIXES}
+      S3_MAX_OBJECT_BYTES: ${S3_MAX_OBJECT_BYTES:-21474836480}
+      S3_MAX_RESTORE_BYTES: ${S3_MAX_RESTORE_BYTES:-42949672960}
+      S3_REQUIRE_CHECKSUM: "true"
+      FRAPPE_HOST_HELPER_SOCKET: /run/frappe-agent/helper.sock
+      BENCH_COMMAND_TIMEOUT_SECONDS: ${BENCH_COMMAND_TIMEOUT_SECONDS:-1800}
+      BENCH_REGISTRY_PATH: /etc/frappe-agent/benches.yaml
+      BENCH_REGISTRY_REQUIRE_EXISTING_PATHS: "false"
+      INVENTORY_DATABASE_PATH: /app/data/inventory.db
+      INVENTORY_RECONCILE_INTERVAL_SECONDS: ${INVENTORY_RECONCILE_INTERVAL_SECONDS:-300}
+      OPERATION_DATABASE_PATH: /app/data/operations.db
+      OPERATION_WORKER_POLL_INTERVAL_SECONDS: ${OPERATION_WORKER_POLL_INTERVAL_SECONDS:-0.5}
+      OPERATION_WORKER_LEASE_SECONDS: ${OPERATION_WORKER_LEASE_SECONDS:-60}
+      OPERATION_WORKER_HEARTBEAT_SECONDS: ${OPERATION_WORKER_HEARTBEAT_SECONDS:-15}
+      OPERATION_RETRY_BASE_SECONDS: ${OPERATION_RETRY_BASE_SECONDS:-5}
+      OPERATION_RETRY_MAX_SECONDS: ${OPERATION_RETRY_MAX_SECONDS:-300}
+      DATA_UPDATE_POLICY_PATH: ${DATA_UPDATE_POLICY_PATH:-}
+      TRAEFIK_DYNAMIC_CONFIG_PATH: ${TRAEFIK_DYNAMIC_CONFIG_PATH}
+      STAGING_DIR: ${STAGING_DIR}
+      STAGING_MAX_AGE_HOURS: ${STAGING_MAX_AGE_HOURS:-24}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AGENT_ID: ${AGENT_ID:?AGENT_ID must be set}
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - /run/frappe-agent/helper.sock:/run/frappe-agent/helper.sock
+      - ${BENCH_REGISTRY_FILE:?BENCH_REGISTRY_FILE must be set}:/etc/frappe-agent/benches.yaml:ro
+      - ${DATA_UPDATE_POLICY_FILE:-/dev/null}:/etc/frappe-agent/data-update-policies.json:ro
+      - ${BENCH_STAGING_ROOT:?BENCH_STAGING_ROOT must be set}:${BENCH_STAGING_ROOT}
+      - ${BENCH_SITES_ROOT:?BENCH_SITES_ROOT must be set}:${BENCH_SITES_ROOT}:ro
+      - ${TRAEFIK_DYNAMIC_CONFIG_PATH}:${TRAEFIK_DYNAMIC_CONFIG_PATH}
+      - agent_data:/app/data
+    group_add:
+      - "${FRAPPE_HOST_HELPER_GID:?FRAPPE_HOST_HELPER_GID must be set}"
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  redis:
+    image: redis:7.4.10-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    container_name: frappe-deploy-agent-redis
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    networks: [state]
+    command: redis-server --appendonly yes --appendfsync everysec --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+
+networks:
+  edge: {}
+  state:
+    internal: true
+
+volumes:
+  redis_data: {}
+  agent_data: {}
