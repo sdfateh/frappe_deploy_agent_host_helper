@@ -153,6 +153,10 @@ services:
     image: redis:7.4.10-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     container_name: frappe-deploy-agent-redis
     restart: unless-stopped
+    # Runs directly as the image's redis user (999:1000) since cap_drop:
+    # ALL removes the capability its entrypoint would otherwise need to
+    # switch from root to that user itself.
+    user: "999:1000"
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

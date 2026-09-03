@@ -37,6 +37,29 @@ real host location and `container_sites_path` at its in-container mount point.
 
 ## Install or upgrade
 
+### Simple setup (recommended)
+
+On a new managed server, run the interactive setup from this repository:
+
+```console
+sudo ./setup.sh
+```
+
+Enter the Bench Compose file, sites directory, domain suffix, and MariaDB root
+password once. The script creates both the Host Helper policy and the Agent
+Bench registry, then installs and starts the Host Helper. You do not need to
+write `host-helper.production.json` or `benches.yaml` yourself.
+
+To also install the completed Agent environment and start the Docker stack:
+
+```console
+sudo ./setup.sh --agent-env /root/frappe-agent.production.env --start-agent
+```
+
+Run `./setup.sh --help` for non-interactive options suitable for automation.
+
+### Manual setup
+
 Clone or extract a reviewed release, prepare the policy and password files, and
 run the installer with sudo:
 
