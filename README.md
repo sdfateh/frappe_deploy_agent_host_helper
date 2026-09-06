@@ -1,25 +1,31 @@
 # Frappe Host Helper
 
 The Frappe Host Helper is a standalone, root-owned systemd service installed
-once on each managed server. It is the only Deploy Agent component allowed to
-invoke `docker compose exec`. The Agent API and Operation Worker receive only
-its Unix socket; they do not receive the Docker socket, Docker CLI, Compose
-paths, or database root passwords.
+once on each managed server. It is the only long-running Deploy Agent component
+allowed to invoke `docker compose exec`. The unified Agent container receives
+only its Unix socket; it does not receive the Docker socket, Docker CLI,
+Compose paths, or database root passwords.
 
-This repository also carries the hardened `compose.yml` and `.env.example` for
-the per-server Deploy Agent API, Operation Worker, and Redis. One reviewed Git
-checkout can therefore install the host service and the complete container
-stack on a managed server. It does not contain either Frappe custom app.
+This repository also carries the hardened one-container `compose.yml`, the
+enrollment/bootstrap client, discovery utility, diagnostics, and the root-owned
+Controller-approved updater. One reviewed Git checkout installs the complete
+managed-server side. It does not contain either Frappe custom app.
+
+Generated site Administrator passwords are held in a local encrypted SQLite
+vault only until the Controller acknowledges their dedicated signed handoff.
+They are never placed in the normal operation result or logs.
 
 ## Requirements
 
 - Linux with systemd
 - Python 3.10 or newer with the `venv` module and `python3-pip`
 - Docker Engine with the `docker compose` plugin
-- A completed helper policy based on `host-helper.example.json`
-- One root-owned mode-`0600` MariaDB password file for each configured Bench
-- A completed Agent environment based on `.env.example` when starting Docker
-- A pushed, scanned Agent image digest referenced by that environment
+- A Server Agent record and one-time install token from the Controller
+- One MariaDB root password for each configured Bench
+- A pushed, scanned Agent image digest configured on the Controller
+
+The Agent environment contains no Cloudflare or AWS credentials. Those secrets
+are configured only on the central `frappe_controller` runtime.
 
 The policy must contain the real, existing Compose file, sites directory,
 staging directory, database password file, domain suffixes, allowed operations,
@@ -39,24 +45,31 @@ real host location and `container_sites_path` at its in-container mount point.
 
 ### Simple setup (recommended)
 
-On a new managed server, run the interactive setup from this repository:
+On the Controller, open the **Server Agent** record and click **Generate Install
+Token**. Then run its displayed command from this repository on the managed
+server:
 
 ```console
-sudo ./setup.sh
+sudo ./setup.sh \
+  --controller https://controller-agent.example.com \
+  --agent-id agent-01
 ```
 
-Enter the Bench Compose file, sites directory, domain suffix, and MariaDB root
-password once. The script creates both the Host Helper policy and the Agent
-Bench registry, then installs and starts the Host Helper. You do not need to
-write `host-helper.production.json` or `benches.yaml` yourself.
+Paste the one-time token when prompted, select a Bench only if more than one is
+found, and enter the MariaDB root password. Setup creates an Ed25519 signing
+key, enrolls its public key over HTTPS, discovers Docker Compose, generates all policies, installs
+the Host Helper, and starts the unified Agent. You do not edit `.env`,
+`host-helper.production.json`, or `benches.yaml`.
 
-To also install the completed Agent environment and start the Docker stack:
+For automation, pass a root-owned mode-`0600` token file:
 
 ```console
-sudo ./setup.sh --agent-env /root/frappe-agent.production.env --start-agent
+sudo ./setup.sh --controller https://controller-agent.example.com \
+  --agent-id agent-01 --enrollment-token-file /root/enrollment-token
 ```
 
-Run `./setup.sh --help` for non-interactive options suitable for automation.
+Check the installation with `sudo ./setup.sh doctor` or
+`sudo ./setup.sh doctor --json`.
 
 ### Manual setup
 
@@ -105,8 +118,9 @@ The installer is idempotent. It:
 8. installs the hardened Compose file and protected environment template;
 9. optionally validates and atomically installs the completed Agent environment;
 10. enables and restarts `frappe-host-helper.service`; and
-11. with `--start-agent`, pulls and starts Agent, Worker, and Redis and waits for
-    their health checks.
+11. with `--start-agent`, pulls and starts the unified Agent and waits for its
+    health check; and
+12. enables the digest-pinned upgrade timer.
 
 When replacing a different policy, the installer preserves the previous policy
 as `/etc/frappe-deploy-agent/host-helper.json.previous`.
@@ -126,18 +140,23 @@ as `/etc/frappe-deploy-agent/host-helper.json.previous`.
 └── secrets/
 
 /opt/frappe-deploy-agent/
-└── compose.yml
+├── compose.yml
+└── upgrade_agent.py
 
 /etc/frappe-agent/
 ├── agent.env
-└── agent.env.example
+├── agent.env.example
+├── benches.yaml
+└── signing/
+    └── agent-signing-key.pem
 
 /etc/systemd/system/frappe-host-helper.service
+/etc/systemd/system/frappe-agent-updater.{service,timer}
 /run/frappe-agent/helper.sock
 ```
 
 The runtime socket is owned by `root:frappe-agent` with mode `0660`. Add the
-reported group GID to both Agent containers and mount only the socket:
+reported group GID to the Agent container and mount only the socket:
 
 ```yaml
 services:
@@ -146,16 +165,11 @@ services:
       - /run/frappe-agent/helper.sock:/run/frappe-agent/helper.sock
     group_add:
       - "${FRAPPE_HOST_HELPER_GID}"
-
-  frappe-operation-worker:
-    volumes:
-      - /run/frappe-agent/helper.sock:/run/frappe-agent/helper.sock
-    group_add:
-      - "${FRAPPE_HOST_HELPER_GID}"
 ```
 
-Do not mount `/var/run/docker.sock` or install the Docker CLI in either Agent
-container.
+Do not mount `/var/run/docker.sock` or install the Docker CLI in the Agent
+container. Only the root-owned, fixed updater service uses Docker to replace an
+approved immutable image digest.
 
 ## Multiple Benches
 
@@ -180,6 +194,7 @@ sensitive command values are redacted from logs.
 sudo systemctl status frappe-host-helper
 sudo journalctl -u frappe-host-helper
 sudo systemctl restart frappe-host-helper
+sudo systemctl status frappe-agent-updater.timer
 sudo docker compose \
   --env-file /etc/frappe-agent/agent.env \
   --file /opt/frappe-deploy-agent/compose.yml \

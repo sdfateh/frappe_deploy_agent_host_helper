@@ -12,6 +12,9 @@ readonly AGENT_CONFIG_ROOT="/etc/frappe-agent"
 readonly AGENT_COMPOSE_TARGET="${AGENT_STACK_ROOT}/compose.yml"
 readonly AGENT_ENV_TARGET="${AGENT_CONFIG_ROOT}/agent.env"
 readonly AGENT_ENV_EXAMPLE_TARGET="${AGENT_CONFIG_ROOT}/agent.env.example"
+readonly AGENT_UPDATER_TARGET="${AGENT_STACK_ROOT}/upgrade_agent.py"
+readonly AGENT_UPDATER_SERVICE_TARGET="/etc/systemd/system/frappe-agent-updater.service"
+readonly AGENT_UPDATER_TIMER_TARGET="/etc/systemd/system/frappe-agent-updater.timer"
 
 config_source=""
 agent_env_source=""
@@ -26,14 +29,14 @@ usage() {
     cat <<'EOF'
 Usage: sudo ./install.sh --config /absolute/path/host-helper.json [options]
 
-Installs or upgrades the Host Helper and the hardened Agent Docker Compose stack.
-The helper always starts. The Agent containers start only with --start-agent.
+Installs or upgrades the Host Helper and the hardened Agent runtime.
+The helper always starts. The Agent runtime starts only with --start-agent.
 
 Options:
   --config PATH      Completed host-helper JSON policy (required).
   --agent-env PATH   Completed Agent environment file to validate and install.
   --agent-uid UID    Container UID allowed to use the socket (default: 10001).
-  --start-agent      Pull and start Agent, Worker, and Redis after installation.
+  --start-agent      Pull and start the unified Agent runtime after installation.
   -h, --help         Show this help.
 EOF
 }
@@ -124,6 +127,9 @@ required_sources=(
     .env.example
     compose.yml
     frappe-host-helper.service
+    upgrade_agent.py
+    frappe-agent-updater.service
+    frappe-agent-updater.timer
 )
 for source_name in "${required_sources[@]}"; do
     [[ -f "${source_root}/${source_name}" ]] || fail "release is incomplete: ${source_name} is missing"
@@ -148,6 +154,9 @@ install -d -o root -g root -m 0755 "${AGENT_STACK_ROOT}" "${AGENT_CONFIG_ROOT}"
 [[ ! -L "${AGENT_ENV_EXAMPLE_TARGET}" ]] || fail "refusing to replace a symlinked Agent environment example"
 install -o root -g root -m 0644 "${source_root}/compose.yml" "${AGENT_COMPOSE_TARGET}"
 install -o root -g root -m 0600 "${source_root}/.env.example" "${AGENT_ENV_EXAMPLE_TARGET}"
+install -o root -g root -m 0700 "${source_root}/upgrade_agent.py" "${AGENT_UPDATER_TARGET}"
+install -o root -g root -m 0644 "${source_root}/frappe-agent-updater.service" "${AGENT_UPDATER_SERVICE_TARGET}"
+install -o root -g root -m 0644 "${source_root}/frappe-agent-updater.timer" "${AGENT_UPDATER_TIMER_TARGET}"
 
 if [[ -n "${agent_env_source}" ]]; then
     [[ ! -L "${AGENT_ENV_TARGET}" ]] || fail "refusing to replace a symlinked Agent environment target"
@@ -174,9 +183,19 @@ elif configured_gid != expected_gid:
     raise SystemExit(
         f"FRAPPE_HOST_HELPER_GID must be auto or the installed group GID {expected_gid}"
     )
-for forbidden in ("DB_ROOT_PASSWORD", "FRAPPE_COMPOSE_FILE"):
+for forbidden in (
+    "DB_ROOT_PASSWORD", "FRAPPE_COMPOSE_FILE", "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY", "S3_BUCKET", "CF_API_TOKEN", "CF_ZONE_ID",
+):
     if any(line.startswith(f"{forbidden}=") for line in lines):
         raise SystemExit(f"legacy secret {forbidden} is forbidden in the hardened Agent environment")
+import re
+repositories = [line.split("=", 1)[1] for line in lines if line.startswith("AGENT_IMAGE_REPOSITORY=")]
+digests = [line.split("=", 1)[1] for line in lines if line.startswith("AGENT_IMAGE_DIGEST=")]
+if len(repositories) != 1 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}", repositories[0]):
+    raise SystemExit("AGENT_IMAGE_REPOSITORY is invalid")
+if len(digests) != 1 or not re.fullmatch(r"[0-9a-f]{64}", digests[0]):
+    raise SystemExit("AGENT_IMAGE_DIGEST must be a lowercase SHA-256 digest")
 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
     docker compose \
@@ -261,6 +280,9 @@ install -o root -g root -m 0644 "${source_root}/frappe-host-helper.service" "${S
 
 systemctl daemon-reload
 systemctl enable frappe-host-helper.service >/dev/null
+if [[ -n "${agent_env_source}" ]]; then
+    systemctl enable frappe-agent-updater.timer >/dev/null
+fi
 systemctl restart frappe-host-helper.service
 systemctl is-active --quiet frappe-host-helper.service || fail "service failed to start; inspect journalctl -u frappe-host-helper"
 
@@ -269,6 +291,10 @@ for _attempt in {1..20}; do
     sleep 0.25
 done
 [[ -S "${SOCKET_PATH}" ]] || fail "service is active but the helper socket was not created"
+
+if [[ -n "${agent_env_source}" && -f "${AGENT_CONFIG_ROOT}/signing/agent-signing-key.pem" ]]; then
+    systemctl restart frappe-agent-updater.timer
+fi
 
 if [[ "${start_agent}" == "true" ]]; then
     docker compose \
@@ -288,7 +314,10 @@ else
     printf 'Set FRAPPE_HOST_HELPER_GID=%s (or auto before running this installer again).\n' "${socket_gid}"
 fi
 if [[ "${start_agent}" == "true" ]]; then
-    printf 'Agent, Worker, and Redis are running.\n'
+    printf 'The unified Agent runtime is running.\n'
 else
     printf 'The Agent Docker stack was installed but not started.\n'
+fi
+if [[ -n "${agent_env_source}" ]]; then
+    printf 'Controller-approved Agent updates are enabled.\n'
 fi

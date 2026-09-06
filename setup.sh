@@ -6,12 +6,14 @@ readonly AGENT_CONFIG_ROOT="/etc/frappe-agent"
 readonly HELPER_CONFIG="${CONFIG_ROOT}/host-helper.json"
 readonly BENCH_REGISTRY="${AGENT_CONFIG_ROOT}/benches.yaml"
 readonly AGENT_COMPOSE="/opt/frappe-deploy-agent/compose.yml"
+readonly AGENT_ENV_TARGET="/etc/frappe-agent/agent.env"
+readonly AGENT_SIGNING_ROOT="/etc/frappe-agent/signing"
 
 bench_id=""
 compose_file=""
-backend_service="backend"
+backend_service=""
 sites_path=""
-container_sites_path="/home/frappe/frappe-bench/sites"
+container_sites_path=""
 staging_path=""
 site_suffix=""
 traefik_service=""
@@ -19,6 +21,15 @@ db_password_file=""
 agent_env=""
 agent_uid="10001"
 start_agent="false"
+controller_url=""
+agent_id=""
+enrollment_token_file=""
+doctor_mode="false"
+doctor_json="false"
+bootstrap_file=""
+discovery_file=""
+allowed_operations_json=""
+allowed_suffixes_json=""
 temporary_dir=""
 
 usage() {
@@ -41,12 +52,73 @@ Options:
   --db-password-file PATH       Existing root-owned mode-0600 password file
   --agent-env PATH              Completed Agent environment file (optional)
   --agent-uid UID               Agent container UID (default: 10001)
-  --start-agent                 Start Agent, Worker, and Redis after setup
+  --controller HTTPS_URL        Enroll with the central Controller
+  --agent-id ID                 Agent ID from the Controller install command
+  --enrollment-token-file PATH  Root-owned mode-0600 token file (otherwise prompt)
+  --start-agent                 Start the unified Agent runtime after setup
+  doctor                        Run non-destructive installed-stack diagnostics
+  --json                        Emit doctor results as JSON
   -h, --help                    Show this help
 
 If --db-password-file is omitted, the script securely asks for the MariaDB root
 password and stores it under /etc/frappe-deploy-agent/secrets/.
 EOF
+}
+
+doctor() {
+    local failures=0
+    local -a results=()
+    check() {
+        local label="$1"
+        shift
+        if "$@" >/dev/null 2>&1; then
+            results+=("${label}|ok")
+            [[ "${doctor_json}" == "true" ]] || printf 'OK    %s\n' "${label}"
+        else
+            results+=("${label}|failed")
+            [[ "${doctor_json}" == "true" ]] || printf 'FAIL  %s\n' "${label}"
+            failures=$((failures + 1))
+        fi
+    }
+    check "Docker service" systemctl is-active --quiet docker.service
+    check "Docker Compose" docker compose version
+    check "Host Helper service" systemctl is-active --quiet frappe-host-helper.service
+    check "Host Helper socket" test -S /run/frappe-agent/helper.sock
+    check "Host Helper policy" test -f "${HELPER_CONFIG}"
+    check "Bench registry" test -f "${BENCH_REGISTRY}"
+    check "Agent environment" test -f "${AGENT_ENV_TARGET}"
+    check "Agent updater timer" systemctl is-active --quiet frappe-agent-updater.timer
+    check "Agent signing key permissions" bash -c \
+        'test "$(stat -c "%u:%G:%a" /etc/frappe-agent/signing/agent-signing-key.pem 2>/dev/null)" = "0:frappe-agent:640"'
+    check "Agent signing key type" openssl pkey -in \
+        "${AGENT_SIGNING_ROOT}/agent-signing-key.pem" -text_pub -noout
+    if [[ -f "${AGENT_ENV_TARGET}" && -f "${AGENT_COMPOSE}" ]]; then
+        check "Agent Compose configuration" docker compose \
+            --env-file "${AGENT_ENV_TARGET}" --file "${AGENT_COMPOSE}" config --quiet
+        check "Agent containers" docker compose \
+            --env-file "${AGENT_ENV_TARGET}" --file "${AGENT_COMPOSE}" ps --status running --quiet
+    fi
+    if ((failures)); then
+        if [[ "${doctor_json}" == "true" ]]; then
+            python3 - "${failures}" "${results[@]}" <<'PY'
+import json, sys
+checks = [{"component": item.rsplit("|", 1)[0], "status": item.rsplit("|", 1)[1]} for item in sys.argv[2:]]
+print(json.dumps({"healthy": int(sys.argv[1]) == 0, "failed": int(sys.argv[1]), "checks": checks}, separators=(",", ":")))
+PY
+        else
+            printf '\nDoctor found %d failed check(s).\n' "${failures}"
+        fi
+        return 1
+    fi
+    if [[ "${doctor_json}" == "true" ]]; then
+        python3 - "0" "${results[@]}" <<'PY'
+import json, sys
+checks = [{"component": item.rsplit("|", 1)[0], "status": item.rsplit("|", 1)[1]} for item in sys.argv[2:]]
+print(json.dumps({"healthy": True, "failed": 0, "checks": checks}, separators=(",", ":")))
+PY
+    else
+        printf '\nAll Agent checks passed.\n'
+    fi
 }
 
 fail() {
@@ -90,12 +162,18 @@ while (($#)); do
         --db-password-file) db_password_file="${2-}"; shift 2 ;;
         --agent-env) agent_env="${2-}"; shift 2 ;;
         --agent-uid) agent_uid="${2-}"; shift 2 ;;
+        --controller) controller_url="${2-}"; shift 2 ;;
+        --agent-id) agent_id="${2-}"; shift 2 ;;
+        --enrollment-token-file) enrollment_token_file="${2-}"; shift 2 ;;
         --start-agent) start_agent="true"; shift ;;
+        doctor) doctor_mode="true"; shift ;;
+        --json) doctor_json="true"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) fail "unknown argument: $1" ;;
     esac
 done
 
+[[ "${doctor_json}" != "true" || "${doctor_mode}" == "true" ]] || fail "--json is only valid with doctor"
 [[ ${EUID} -eq 0 ]] || fail "run this command with sudo"
 for command in python3 install readlink mktemp rm; do
     command -v "${command}" >/dev/null 2>&1 || fail "required command is missing: ${command}"
@@ -103,6 +181,61 @@ done
 
 source_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 [[ -x "${source_root}/install.sh" ]] || fail "install.sh is missing or not executable"
+
+if [[ "${doctor_mode}" == "true" ]]; then
+    doctor
+    exit $?
+fi
+
+if [[ -n "${controller_url}" ]]; then
+    [[ -n "${agent_id}" ]] || fail "--controller requires --agent-id from the Controller install command"
+    for command in openssl docker; do
+        command -v "${command}" >/dev/null 2>&1 || fail "required enrollment command is missing: ${command}"
+    done
+    temporary_dir="$(mktemp -d /run/frappe-setup.XXXXXXXX)"
+    chmod 0700 "${temporary_dir}"
+    bootstrap_args=(
+        --controller "${controller_url}" --agent-id "${agent_id}"
+        --output "${temporary_dir}/signing"
+    )
+    if [[ -n "${enrollment_token_file}" ]]; then
+        bootstrap_args+=(--token-file "${enrollment_token_file}")
+    fi
+    python3 "${source_root}/bootstrap.py" "${bootstrap_args[@]}" >/dev/null
+    bootstrap_file="${temporary_dir}/signing/bootstrap.json"
+    discovery_file="${temporary_dir}/discovery.json"
+    discovery_args=(--output "${discovery_file}")
+    [[ -z "${compose_file}" ]] || discovery_args+=(--compose-file "${compose_file}")
+    [[ -z "${backend_service}" ]] || discovery_args+=(--backend-service "${backend_service}")
+    [[ -z "${sites_path}" ]] || discovery_args+=(--sites-path "${sites_path}")
+    [[ -z "${container_sites_path}" ]] || discovery_args+=(--container-sites-path "${container_sites_path}")
+    [[ -z "${staging_path}" ]] || discovery_args+=(--staging-path "${staging_path}")
+    [[ -z "${traefik_service}" ]] || discovery_args+=(--traefik-service "${traefik_service}")
+    python3 "${source_root}/discover.py" "${discovery_args[@]}"
+    eval "$(python3 - "${discovery_file}" <<'PY'
+import json, shlex, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+for key in ("bench_id", "compose_file", "backend_service", "sites_path", "container_sites_path", "staging_path", "traefik_service"):
+    print(f"{key}={shlex.quote(str(value[key]))}")
+PY
+)"
+    site_suffix="$(python3 - "${bootstrap_file}" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["policy"]["allowed_site_suffixes"][0])
+PY
+)"
+    allowed_suffixes_json="$(python3 - "${bootstrap_file}" <<'PY'
+import json, sys
+print(json.dumps(json.load(open(sys.argv[1], encoding="utf-8"))["policy"]["allowed_site_suffixes"], separators=(",", ":")))
+PY
+)"
+    allowed_operations_json="$(python3 - "${bootstrap_file}" <<'PY'
+import json, sys
+print(json.dumps(json.load(open(sys.argv[1], encoding="utf-8"))["policy"]["allowed_operations"], separators=(",", ":")))
+PY
+)"
+    start_agent="true"
+fi
 
 [[ -n "${bench_id}" ]] || prompt bench_id "Bench ID" "production-a"
 [[ -n "${compose_file}" ]] || prompt compose_file "Frappe Compose file"
@@ -165,10 +298,12 @@ if [[ -n "${agent_env}" ]]; then
     [[ "${agent_env}" == /* && -f "${agent_env}" && ! -L "${agent_env}" ]] || fail "Agent environment must be an existing absolute regular file, not a symlink"
     agent_env="$(readlink -f -- "${agent_env}")"
 fi
-[[ "${start_agent}" != "true" || -n "${agent_env}" ]] || fail "--start-agent requires --agent-env"
+[[ "${start_agent}" != "true" || -n "${agent_env}" || -n "${bootstrap_file}" ]] || fail "--start-agent requires --agent-env or Controller enrollment"
 
-temporary_dir="$(mktemp -d /run/frappe-setup.XXXXXXXX)"
-chmod 0700 "${temporary_dir}"
+if [[ -z "${temporary_dir}" ]]; then
+    temporary_dir="$(mktemp -d /run/frappe-setup.XXXXXXXX)"
+    chmod 0700 "${temporary_dir}"
+fi
 helper_temporary="${temporary_dir}/host-helper.json"
 registry_temporary="${temporary_dir}/benches.yaml"
 
@@ -176,7 +311,8 @@ python3 - \
     "${helper_temporary}" "${registry_temporary}" "${bench_id}" \
     "${compose_file}" "${backend_service}" "${sites_path}" \
     "${container_sites_path}" "${staging_path}" "${db_password_file}" \
-    "${site_suffix}" "${traefik_service}" "${agent_uid}" <<'PY'
+    "${site_suffix}" "${traefik_service}" "${agent_uid}" \
+    "${allowed_operations_json}" "${allowed_suffixes_json}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -184,16 +320,23 @@ from pathlib import Path
 (
     helper_path, registry_path, bench_id, compose_file, backend_service,
     sites_path, container_sites_path, staging_path, password_file,
-    suffix, traefik_service, agent_uid,
+    suffix, traefik_service, agent_uid, allowed_operations_json,
+    allowed_suffixes_json,
 ) = sys.argv[1:]
 
-operations = [
+default_operations = [
     "site.create", "site.create_blank", "site.create_from_backup",
     "site.backup", "site.restore", "site.reinstall", "site.delete",
     "site.migrate", "site.scheduler.enable", "site.scheduler.disable",
     "site.maintenance.enable", "site.maintenance.disable",
     "site.config.update", "site.verify",
 ]
+operations = json.loads(allowed_operations_json) if allowed_operations_json else default_operations
+if not isinstance(operations, list) or not operations or any(not isinstance(item, str) for item in operations):
+    raise SystemExit("Controller allowed_operations policy is invalid")
+suffixes = json.loads(allowed_suffixes_json) if allowed_suffixes_json else [suffix]
+if not isinstance(suffixes, list) or not suffixes or any(not isinstance(item, str) for item in suffixes):
+    raise SystemExit("Controller allowed_site_suffixes policy is invalid")
 
 helper_bench = {
     "bench_id": bench_id,
@@ -204,7 +347,7 @@ helper_bench = {
     "host_staging_path": staging_path,
     "container_staging_path": staging_path,
     "db_root_password_file": password_file,
-    "allowed_site_suffixes": [suffix],
+    "allowed_site_suffixes": suffixes,
     "allowed_operations": operations,
     "allowed_site_config_keys": [],
     "allowed_data_update_policies": [],
@@ -219,7 +362,7 @@ registry_bench = {
     "container_staging_path": staging_path,
     "db_secret_ref": f"bench-{bench_id}-db-root",
     "traefik_frontend_service": traefik_service,
-    "allowed_domain_suffixes": [suffix],
+    "allowed_domain_suffixes": suffixes,
     "allowed_operations": operations,
     "concurrency_limit": 1,
 }
@@ -238,6 +381,53 @@ Path(registry_path).write_text(json.dumps(registry, indent=2) + "\n", encoding="
 PY
 chmod 0600 "${helper_temporary}" "${registry_temporary}"
 
+if [[ -n "${bootstrap_file}" ]]; then
+    agent_env="${temporary_dir}/agent.env"
+    python3 - \
+        "${bootstrap_file}" "${discovery_file}" "${agent_env}" \
+        "${BENCH_REGISTRY}" "${site_suffix}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+bootstrap = json.load(open(sys.argv[1], encoding="utf-8"))
+discovery = json.load(open(sys.argv[2], encoding="utf-8"))
+target = Path(sys.argv[3])
+registry = sys.argv[4]
+suffix = sys.argv[5]
+
+def env(name, value):
+    text = str(value)
+    if "\n" in text or "\r" in text:
+        raise SystemExit(f"invalid newline in {name}")
+    return f"{name}={text}"
+
+values = [
+    env("FRAPPE_HOST_HELPER_SOCKET", "/run/frappe-agent/helper.sock"),
+    env("FRAPPE_HOST_HELPER_GID", "auto"),
+    env("BENCH_REGISTRY_FILE", registry),
+    env("BENCH_STAGING_ROOT", discovery["staging_path"]),
+    env("BENCH_SITES_ROOT", discovery["sites_path"]),
+    env("TRAEFIK_DYNAMIC_CONFIG_PATH", "/deploy/proxy/simple-traefik/config/dynamic"),
+    env("TRAEFIK_FRONTEND_SERVICE", discovery["traefik_service"]),
+    env("STAGING_DIR", discovery["staging_path"]),
+    env("AGENT_IMAGE_REPOSITORY", bootstrap["image"]["reference"].rsplit("@sha256:", 1)[0]),
+    env("AGENT_IMAGE_DIGEST", bootstrap["image"]["reference"].rsplit("@sha256:", 1)[1]),
+    env("AGENT_ID", bootstrap["agent"]["agent_id"]),
+    env("CONTROLLER_URL", bootstrap["controller"]["url"]),
+    env("CONTROLLER_SITE_NAME", bootstrap["controller"].get("site_name", "")),
+    env("CONTROLLER_AUDIENCE", bootstrap["agent"]["audience"]),
+    env("CONTROLLER_ALLOWED_OPERATIONS", json.dumps(bootstrap["policy"]["allowed_operations"], separators=(",", ":"))),
+    env("CONTROLLER_CA_CERTIFICATE_PATH", ""),
+    env("DATA_UPDATE_POLICY_FILE", ""),
+    env("DATA_UPDATE_POLICY_PATH", ""),
+    env("LOG_LEVEL", "INFO"),
+]
+target.write_text("\n".join(values) + "\n", encoding="utf-8")
+target.chmod(0o600)
+PY
+fi
+
 install_args=(--config "${helper_temporary}" --agent-uid "${agent_uid}")
 if [[ -n "${agent_env}" ]]; then
     install_args+=(--agent-env "${agent_env}")
@@ -248,6 +438,19 @@ if [[ -e "${BENCH_REGISTRY}" ]] && ! cmp -s "${BENCH_REGISTRY}" "${registry_temp
     install -o root -g root -m 0600 "${BENCH_REGISTRY}" "${BENCH_REGISTRY}.previous"
 fi
 install -o root -g root -m 0600 "${registry_temporary}" "${BENCH_REGISTRY}"
+
+if [[ -n "${bootstrap_file}" ]]; then
+    install -d -o root -g root -m 0700 "${AGENT_SIGNING_ROOT}"
+    for source_name in agent-signing-key.pem; do
+        target_name="${AGENT_SIGNING_ROOT}/${source_name}"
+        [[ ! -L "${target_name}" ]] || fail "refusing to replace symlinked signing-key file: ${target_name}"
+        if [[ -e "${target_name}" ]]; then
+            install -o root -g root -m 0600 "${target_name}" "${target_name}.previous"
+        fi
+        install -o root -g frappe-agent -m 0640 "${temporary_dir}/signing/${source_name}" "${target_name}"
+    done
+    systemctl restart frappe-agent-updater.timer
+fi
 
 if [[ "${start_agent}" == "true" ]]; then
     docker compose --env-file /etc/frappe-agent/agent.env --file "${AGENT_COMPOSE}" \

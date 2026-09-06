@@ -1,0 +1,12 @@
+[Unit]
+Description=Check for approved Frappe Deploy Agent upgrades
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+RandomizedDelaySec=15s
+Persistent=true
+Unit=frappe-agent-updater.service
+
+[Install]
+WantedBy=timers.target
