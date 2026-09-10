@@ -93,8 +93,10 @@ sudo ./install.sh \
 
 The completed Agent environment may keep `FRAPPE_HOST_HELPER_GID=auto`; the
 installer replaces it with the server's actual socket-group GID before Compose
-validation. The environment must reference an immutable registry digest, not a
-mutable image tag.
+validation. It also assigns that `frappe-agent` group to
+`TRAEFIK_DYNAMIC_CONFIG_PATH` and applies mode `2775`; the Agent can then
+manage Traefik route files without manual permission changes. The environment
+must reference an immutable registry digest, not a mutable image tag.
 
 If the Agent containers use a different UID:
 
@@ -116,7 +118,9 @@ The installer is idempotent. It:
    `0600`;
 7. atomically points `/opt/frappe-host-helper/current` at the release;
 8. installs the hardened Compose file and protected environment template;
-9. optionally validates and atomically installs the completed Agent environment;
+9. optionally validates and atomically installs the completed Agent environment, then
+   grants its `frappe-agent` group access to the configured Traefik dynamic
+   directory;
 10. enables and restarts `frappe-host-helper.service`; and
 11. with `--start-agent`, pulls and starts the unified Agent and waits for its
     health check; and

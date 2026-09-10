@@ -93,6 +93,12 @@ doctor() {
     check "Agent signing key type" openssl pkey -in \
         "${AGENT_SIGNING_ROOT}/agent-signing-key.pem" -text_pub -noout
     if [[ -f "${AGENT_ENV_TARGET}" && -f "${AGENT_COMPOSE}" ]]; then
+        traefik_dynamic_config_path="$(sed -n 's/^TRAEFIK_DYNAMIC_CONFIG_PATH=//p' "${AGENT_ENV_TARGET}")"
+        if [[ -n "${traefik_dynamic_config_path}" ]]; then
+            check "Traefik route directory permissions" bash -c 'test -d "$1" && test ! -L "$1" && test "$(stat -c "%G:%a" "$1")" = "frappe-agent:2775"' _ "${traefik_dynamic_config_path}"
+        else
+            check "Traefik route directory permissions" false
+        fi
         check "Agent Compose configuration" docker compose \
             --env-file "${AGENT_ENV_TARGET}" --file "${AGENT_COMPOSE}" config --quiet
         check "Agent containers" docker compose \
@@ -175,7 +181,7 @@ done
 
 [[ "${doctor_json}" != "true" || "${doctor_mode}" == "true" ]] || fail "--json is only valid with doctor"
 [[ ${EUID} -eq 0 ]] || fail "run this command with sudo"
-for command in python3 install readlink mktemp rm; do
+for command in python3 install readlink mktemp rm sed stat; do
     command -v "${command}" >/dev/null 2>&1 || fail "required command is missing: ${command}"
 done
 

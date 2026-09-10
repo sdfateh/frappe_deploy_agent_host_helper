@@ -46,6 +46,33 @@ fail() {
     exit 1
 }
 
+configure_traefik_route_directory() {
+    local env_file="$1" configured_path="" route_directory=""
+    configured_path="$(python3 - "${env_file}" <<'PY'
+import sys
+from pathlib import Path
+
+values = []
+for raw_line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if line and not line.startswith("#") and line.startswith("TRAEFIK_DYNAMIC_CONFIG_PATH="):
+        values.append(line.split("=", 1)[1])
+if len(values) != 1 or not values[0]:
+    raise SystemExit("Agent environment must define TRAEFIK_DYNAMIC_CONFIG_PATH exactly once")
+candidate = Path(values[0])
+if not candidate.is_absolute():
+    raise SystemExit("TRAEFIK_DYNAMIC_CONFIG_PATH must be an absolute path")
+print(candidate)
+PY
+)" || fail "Agent environment has an invalid TRAEFIK_DYNAMIC_CONFIG_PATH"
+    [[ -d "${configured_path}" && ! -L "${configured_path}" ]] || fail "TRAEFIK_DYNAMIC_CONFIG_PATH must be an existing directory, not a symlink"
+    route_directory="$(readlink -f -- "${configured_path}")"
+    [[ "${route_directory}" != "/" ]] || fail "refusing to change permissions on /"
+    # The Agent container has this group as a supplementary group. Setgid keeps new route files in it.
+    chgrp "${SOCKET_GROUP}" "${route_directory}"
+    chmod 2775 "${route_directory}"
+}
+
 cleanup() {
     if [[ "${release_staging}" == "${INSTALL_ROOT}"/.install.* && -d "${release_staging}" ]]; then
         rm -rf -- "${release_staging}"
@@ -99,7 +126,7 @@ done
 [[ "${agent_uid}" =~ ^[0-9]+$ ]] || fail "--agent-uid must be a non-negative integer"
 ((agent_uid <= 4294967295)) || fail "--agent-uid is outside the supported range"
 
-for command in python3 install systemctl docker groupadd getent readlink sha256sum cmp cut tr mktemp mv ln rm sleep; do
+for command in python3 install systemctl docker groupadd getent readlink sha256sum cmp cut tr mktemp mv ln rm sleep chgrp chmod; do
     command -v "${command}" >/dev/null 2>&1 || fail "required command is missing: ${command}"
 done
 [[ -d /run/systemd/system ]] || fail "systemd is not running on this server"
@@ -206,6 +233,7 @@ PY
         install -o root -g root -m 0600 "${AGENT_ENV_TARGET}" "${AGENT_ENV_TARGET}.previous"
     fi
     mv -fT -- "${agent_env_temporary}" "${AGENT_ENV_TARGET}"
+    configure_traefik_route_directory "${AGENT_ENV_TARGET}"
 fi
 
 version="$(tr -d '[:space:]' < "${source_root}/VERSION")"
