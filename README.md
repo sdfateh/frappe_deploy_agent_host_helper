@@ -69,7 +69,8 @@ sudo ./setup.sh --controller https://controller-agent.example.com \
 ```
 
 Check the installation with `sudo ./setup.sh doctor` or
-`sudo ./setup.sh doctor --json`.
+`sudo ./setup.sh doctor --json`. To repair the safe Traefik route-directory
+permission finding, run `sudo ./setup.sh doctor --fix`.
 
 ### Manual setup
 

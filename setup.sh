@@ -26,6 +26,7 @@ agent_id=""
 enrollment_token_file=""
 doctor_mode="false"
 doctor_json="false"
+doctor_fix="false"
 bootstrap_file=""
 discovery_file=""
 allowed_operations_json=""
@@ -56,13 +57,29 @@ Options:
   --agent-id ID                 Agent ID from the Controller install command
   --enrollment-token-file PATH  Root-owned mode-0600 token file (otherwise prompt)
   --start-agent                 Start the unified Agent runtime after setup
-  doctor                        Run non-destructive installed-stack diagnostics
+  doctor                        Run installed-stack diagnostics
+  --fix                         Repair safe doctor findings (doctor only)
   --json                        Emit doctor results as JSON
   -h, --help                    Show this help
 
 If --db-password-file is omitted, the script securely asks for the MariaDB root
 password and stores it under /etc/frappe-deploy-agent/secrets/.
 EOF
+}
+
+repair_traefik_route_directory() {
+    local -a configured_paths=()
+    local route_directory=""
+    [[ -f "${AGENT_ENV_TARGET}" ]] || fail "Agent environment is missing"
+    mapfile -t configured_paths < <(sed -n 's/^TRAEFIK_DYNAMIC_CONFIG_PATH=//p' "${AGENT_ENV_TARGET}")
+    [[ ${#configured_paths[@]} -eq 1 && -n "${configured_paths[0]}" ]] || fail "Agent environment must define TRAEFIK_DYNAMIC_CONFIG_PATH exactly once"
+    [[ "${configured_paths[0]}" == /* && -d "${configured_paths[0]}" && ! -L "${configured_paths[0]}" ]] || fail "TRAEFIK_DYNAMIC_CONFIG_PATH must be an existing absolute directory, not a symlink"
+    route_directory="$(readlink -f -- "${configured_paths[0]}")"
+    [[ "${route_directory}" != "/" ]] || fail "refusing to change permissions on /"
+    getent group frappe-agent >/dev/null || fail "frappe-agent group is missing"
+    chgrp frappe-agent "${route_directory}"
+    chmod 2775 "${route_directory}"
+    printf 'FIXED Traefik route directory permissions: %s\n' "${route_directory}"
 }
 
 doctor() {
@@ -173,6 +190,7 @@ while (($#)); do
         --enrollment-token-file) enrollment_token_file="${2-}"; shift 2 ;;
         --start-agent) start_agent="true"; shift ;;
         doctor) doctor_mode="true"; shift ;;
+        --fix) doctor_fix="true"; shift ;;
         --json) doctor_json="true"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) fail "unknown argument: $1" ;;
@@ -180,8 +198,9 @@ while (($#)); do
 done
 
 [[ "${doctor_json}" != "true" || "${doctor_mode}" == "true" ]] || fail "--json is only valid with doctor"
+[[ "${doctor_fix}" != "true" || "${doctor_mode}" == "true" ]] || fail "--fix is only valid with doctor"
 [[ ${EUID} -eq 0 ]] || fail "run this command with sudo"
-for command in python3 install readlink mktemp rm sed stat; do
+for command in python3 install readlink mktemp rm sed stat getent chgrp chmod; do
     command -v "${command}" >/dev/null 2>&1 || fail "required command is missing: ${command}"
 done
 
@@ -189,6 +208,7 @@ source_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 [[ -x "${source_root}/install.sh" ]] || fail "install.sh is missing or not executable"
 
 if [[ "${doctor_mode}" == "true" ]]; then
+    [[ "${doctor_fix}" != "true" ]] || repair_traefik_route_directory
     doctor
     exit $?
 fi
