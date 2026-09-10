@@ -67,6 +67,17 @@ password and stores it under /etc/frappe-deploy-agent/secrets/.
 EOF
 }
 
+repair_agent_file_permissions() {
+    local signing_key="${AGENT_SIGNING_ROOT}/agent-signing-key.pem"
+    [[ -f "${BENCH_REGISTRY}" && ! -L "${BENCH_REGISTRY}" ]] || fail "Bench registry must be a regular file, not a symlink"
+    [[ -d "${AGENT_SIGNING_ROOT}" && ! -L "${AGENT_SIGNING_ROOT}" ]] || fail "Agent signing directory must be a directory, not a symlink"
+    [[ -f "${signing_key}" && ! -L "${signing_key}" ]] || fail "Agent signing key must be a regular file, not a symlink"
+    chgrp frappe-agent "${BENCH_REGISTRY}" "${AGENT_SIGNING_ROOT}" "${signing_key}"
+    chmod 0640 "${BENCH_REGISTRY}" "${signing_key}"
+    chmod 0750 "${AGENT_SIGNING_ROOT}"
+    printf 'FIXED Agent registry and signing permissions\n'
+}
+
 repair_traefik_route_directory() {
     local -a configured_paths=()
     local route_directory=""
@@ -102,11 +113,14 @@ doctor() {
     check "Host Helper service" systemctl is-active --quiet frappe-host-helper.service
     check "Host Helper socket" test -S /run/frappe-agent/helper.sock
     check "Host Helper policy" test -f "${HELPER_CONFIG}"
-    check "Bench registry" test -f "${BENCH_REGISTRY}"
+    check "Bench registry permissions" bash -c \
+        'test "$(stat -c "%u:%G:%a" /etc/frappe-agent/benches.yaml 2>/dev/null)" = "0:frappe-agent:640"'
     check "Agent environment" test -f "${AGENT_ENV_TARGET}"
     check "Agent updater timer" systemctl is-active --quiet frappe-agent-updater.timer
     check "Agent signing key permissions" bash -c \
         'test "$(stat -c "%u:%G:%a" /etc/frappe-agent/signing/agent-signing-key.pem 2>/dev/null)" = "0:frappe-agent:640"'
+    check "Agent signing directory permissions" bash -c \
+        'test "$(stat -c "%u:%G:%a" /etc/frappe-agent/signing 2>/dev/null)" = "0:frappe-agent:750"'
     check "Agent signing key type" openssl pkey -in \
         "${AGENT_SIGNING_ROOT}/agent-signing-key.pem" -text_pub -noout
     if [[ -f "${AGENT_ENV_TARGET}" && -f "${AGENT_COMPOSE}" ]]; then
@@ -208,7 +222,10 @@ source_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 [[ -x "${source_root}/install.sh" ]] || fail "install.sh is missing or not executable"
 
 if [[ "${doctor_mode}" == "true" ]]; then
-    [[ "${doctor_fix}" != "true" ]] || repair_traefik_route_directory
+    if [[ "${doctor_fix}" == "true" ]]; then
+        repair_agent_file_permissions
+        repair_traefik_route_directory
+    fi
     doctor
     exit $?
 fi
@@ -461,12 +478,12 @@ fi
 "${source_root}/install.sh" "${install_args[@]}"
 
 if [[ -e "${BENCH_REGISTRY}" ]] && ! cmp -s "${BENCH_REGISTRY}" "${registry_temporary}"; then
-    install -o root -g root -m 0600 "${BENCH_REGISTRY}" "${BENCH_REGISTRY}.previous"
+    install -o root -g frappe-agent -m 0640 "${BENCH_REGISTRY}" "${BENCH_REGISTRY}.previous"
 fi
-install -o root -g root -m 0600 "${registry_temporary}" "${BENCH_REGISTRY}"
+install -o root -g frappe-agent -m 0640 "${registry_temporary}" "${BENCH_REGISTRY}"
 
 if [[ -n "${bootstrap_file}" ]]; then
-    install -d -o root -g root -m 0700 "${AGENT_SIGNING_ROOT}"
+    install -d -o root -g frappe-agent -m 0750 "${AGENT_SIGNING_ROOT}"
     for source_name in agent-signing-key.pem; do
         target_name="${AGENT_SIGNING_ROOT}/${source_name}"
         [[ ! -L "${target_name}" ]] || fail "refusing to replace symlinked signing-key file: ${target_name}"
