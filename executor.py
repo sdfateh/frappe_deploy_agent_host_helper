@@ -27,7 +27,7 @@ from .protocol import HelperBenchPolicy, HelperConfig, Operation
 
 logger = logging.getLogger(__name__)
 
-_SENSITIVE_FLAGS = {"--db-root-password", "--mariadb-root-password", "--admin-password"}
+_SENSITIVE_FLAGS = {"--db-root-password", "--mariadb-root-password", "--admin-password", "set-admin-password"}
 _ADMIN_ALPHABET = string.ascii_letters + string.digits
 
 _COMPANION_SCRIPT = r'''
@@ -226,6 +226,31 @@ def _compose_command(policy: HelperBenchPolicy, bench_arguments: list[str]) -> l
     ]
 
 
+def _available_apps(policy: HelperBenchPolicy, config: HelperConfig, cancellation_event=None) -> set[str]:
+    result = run_fixed(_compose_command(policy, ["bench", "version", "--format", "json"]), config,
+                       cancellation_event=cancellation_event)
+    try:
+        rows = json.loads(result.stdout)
+        if not isinstance(rows, list) or any(not isinstance(row, dict) or not isinstance(row.get("app"), str) for row in rows):
+            raise ValueError
+        return {row["app"] for row in rows}
+    except (ValueError, TypeError):
+        raise ExecutionFailed("could not verify available bench apps") from None
+
+
+def _installed_apps(policy: HelperBenchPolicy, config: HelperConfig, domain: str, cancellation_event=None) -> set[str]:
+    result = run_fixed(_compose_command(policy, ["bench", "--site", domain, "list-apps", "--format", "json"]),
+                       config, cancellation_event=cancellation_event)
+    try:
+        value = json.loads(result.stdout)
+        apps = value.get(domain) if isinstance(value, dict) else None
+        if not isinstance(apps, list) or any(not isinstance(app, str) for app in apps):
+            raise ValueError
+        return set(apps)
+    except (ValueError, TypeError):
+        raise ExecutionFailed("could not verify installed site apps") from None
+
+
 _DATA_UPDATE_RESULT_KEYS = frozenset({
     "contract_version", "operation_id", "operation", "policy_id",
     "policy_version", "payload_hash", "actor", "reason", "target", "dry_run",
@@ -323,6 +348,39 @@ def execute(
     """Map a validated typed operation to a locally constructed command."""
     policy = config.bench(operation.bench_id)
     values = operation.arguments
+    if operation.name == "reset_administrator_password":
+        run_fixed(_compose_command(policy, ["bench", "--site", values["domain"], "set-admin-password", values["password"]]),
+                  config, cancellation_event=cancellation_event)
+        return {"updated": True}
+    if operation.name == "provisioning_preflight":
+        if not set(policy.required_apps) <= _available_apps(policy, config, cancellation_event):
+            raise ExecutionFailed("required apps are missing from the bench")
+        # Fixed service/port are root-owned. This checks the actual target
+        # frontend listener without creating a site, route, or DNS record.
+        command = ["docker", "compose", "-f", str(policy.compose_file), "exec", "-T", policy.frontend_service,
+                   "curl", "--silent", "--show-error", "--max-time", "10", "--output", "/dev/null",
+                   "--write-out", "%{http_code}", f"http://127.0.0.1:{policy.frontend_port}/"]
+        result = run_fixed(command, config, cancellation_event=cancellation_event)
+        status = result.stdout.strip()
+        if not (status.isdigit() and (200 <= int(status) < 400 or status == "404")):
+            raise ExecutionFailed("target frontend is unavailable")
+        return {"ready": True, "required_apps": list(policy.required_apps)}
+
+    if operation.name in {"ensure_site_apps", "verify_required_apps"}:
+        domain = values["domain"]
+        installed = _installed_apps(policy, config, domain, cancellation_event)
+        if operation.name == "ensure_site_apps":
+            if not set(policy.required_apps) <= _available_apps(policy, config, cancellation_event):
+                raise ExecutionFailed("required apps are missing from the bench")
+            for app in policy.required_apps:
+                if app not in installed:
+                    run_fixed(_compose_command(policy, ["bench", "--site", domain, "install-app", app]), config,
+                              cancellation_event=cancellation_event)
+                    installed = _installed_apps(policy, config, domain, cancellation_event)
+        if not set(policy.required_apps) <= installed:
+            raise ExecutionFailed("required site apps are not installed")
+        return {"ready": True, "required_apps": list(policy.required_apps)}
+
     if operation.name == "new_site":
         password = _read_db_password(policy.db_root_password_file)
         admin_password = "".join(secrets.choice(_ADMIN_ALPHABET) for _ in range(16))

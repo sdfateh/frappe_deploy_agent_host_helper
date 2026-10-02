@@ -31,12 +31,18 @@ _SENSITIVE_CONFIG_MARKERS = (
     "secret", "token",
 )
 _HELPER_OPERATIONS = frozenset({
+    "reset_administrator_password",
+    "provisioning_preflight", "ensure_site_apps", "verify_required_apps",
     "new_site", "restore_site", "drop_site", "enable_scheduler",
     "restore_companion_assets", "backup_site", "migrate_site",
     "scheduler_set", "maintenance_set", "config_set", "verify_site",
     "data_update",
 })
 _POLICY_OPERATIONS = {
+    "reset_administrator_password": frozenset({"site.create", "site.create_from_backup"}),
+    "provisioning_preflight": frozenset({"site.create", "site.create_blank", "site.create_from_backup"}),
+    "ensure_site_apps": frozenset({"site.create_blank"}),
+    "verify_required_apps": frozenset({"site.create", "site.create_blank", "site.create_from_backup"}),
     "new_site": frozenset({"site.create", "site.create_blank", "site.create_from_backup"}),
     "restore_site": frozenset({"site.create", "site.create_from_backup", "site.restore", "site.reinstall"}),
     "drop_site": frozenset({"site.delete"}),
@@ -141,6 +147,9 @@ class HelperBenchPolicy:
     allowed_site_config_keys: frozenset[str] = frozenset()
     allowed_data_update_policies: tuple[DataUpdatePolicyGrant, ...] = ()
     concurrency_limit: int = 1
+    required_apps: tuple[str, ...] = ("frappe",)
+    frontend_service: str = "frontend"
+    frontend_port: int = 8080
 
     @classmethod
     def from_mapping(cls, value: Any) -> "HelperBenchPolicy":
@@ -149,9 +158,11 @@ class HelperBenchPolicy:
             "host_staging_path", "container_staging_path", "db_root_password_file",
             "allowed_site_suffixes", "allowed_operations", "allowed_site_config_keys",
             "concurrency_limit", "allowed_data_update_policies",
+            "required_apps", "frontend_service", "frontend_port",
         }
         required = expected - {
-            "allowed_site_config_keys", "allowed_data_update_policies", "concurrency_limit"
+            "allowed_site_config_keys", "allowed_data_update_policies", "concurrency_limit",
+            "required_apps", "frontend_service", "frontend_port",
         }
         if not isinstance(value, dict) or not required <= value.keys() or value.keys() - expected:
             raise RequestRejected("invalid helper bench configuration keys")
@@ -176,6 +187,15 @@ class HelperBenchPolicy:
         ):
             raise RequestRejected("at least one valid operation is required")
         concurrency = value.get("concurrency_limit", 1)
+        apps = value.get("required_apps", ["frappe"])
+        if (not isinstance(apps, list) or not 1 <= len(apps) <= 32
+            or any(not isinstance(app, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", app) for app in apps)
+            or len(set(apps)) != len(apps) or apps[0] != "frappe"):
+            raise RequestRejected("invalid required apps policy")
+        frontend = value.get("frontend_service", "frontend")
+        port = value.get("frontend_port", 8080)
+        if not isinstance(frontend, str) or not _SERVICE_RE.fullmatch(frontend) or type(port) is not int or not 1 <= port <= 65535:
+            raise RequestRejected("invalid frontend policy")
         if type(concurrency) is not int or not 1 <= concurrency <= 64:
             raise RequestRejected("invalid concurrency limit")
         raw_config_keys = value.get("allowed_site_config_keys", [])
@@ -205,6 +225,7 @@ class HelperBenchPolicy:
             allowed_site_config_keys=frozenset(raw_config_keys),
             allowed_data_update_policies=grants,
             concurrency_limit=concurrency,
+            required_apps=tuple(apps), frontend_service=frontend, frontend_port=port,
         )
 
 
@@ -479,7 +500,18 @@ def parse_request(raw: bytes, config: HelperConfig) -> Operation:
     if not (_POLICY_OPERATIONS[name] & policy.allowed_operations):
         raise RequestRejected("operation is not allowed for bench")
     arguments = request["arguments"]
-    if name == "new_site":
+    if name == "reset_administrator_password":
+        values = _require_exact(arguments, {"domain", "password"})
+        password = values["password"]
+        if not isinstance(password, str) or not re.fullmatch(r"[A-Za-z0-9]{16,128}", password):
+            raise RequestRejected("invalid generated Administrator password")
+        normalized = {"domain": _site(values["domain"], policy, must_exist=True), "password": password}
+    elif name in {"provisioning_preflight", "ensure_site_apps", "verify_required_apps"}:
+        values = _require_exact(arguments, {"domain", "required_apps"})
+        if values["required_apps"] != list(policy.required_apps):
+            raise RequestRejected("agent and helper required apps policies differ")
+        normalized = {"domain": _site(values["domain"], policy, must_exist=name != "provisioning_preflight")}
+    elif name == "new_site":
         values = _require_exact(arguments, {"domain"})
         normalized = {"domain": _site(values["domain"], policy, must_exist=False)}
     elif name in {"enable_scheduler", "migrate_site", "verify_site"}:

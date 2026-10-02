@@ -139,7 +139,7 @@ def main() -> int:
         f"{controller}{ENDPOINT}",
         data=payload,
         method="POST",
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "frappe-agent/1.0"},
     )
     raw = b""
     for attempt in range(3):

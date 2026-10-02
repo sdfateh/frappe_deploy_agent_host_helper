@@ -121,6 +121,7 @@ def request(values: dict[str, str], action: str, digest: str) -> dict:
         f"{controller}{UPGRADE_PATH}", data=body, method="POST",
         headers={
             "Content-Type": "application/json", "Accept": "application/json",
+            "User-Agent": "frappe-agent/1.0",
             "X-Frappe-Agent-ID": agent_id,
             "X-Frappe-Agent-Sequence": sequence,
             "X-Frappe-Agent-Signature": signature,

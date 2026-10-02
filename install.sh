@@ -20,6 +20,7 @@ config_source=""
 agent_env_source=""
 agent_uid="10001"
 start_agent="false"
+helper_only="false"
 release_staging=""
 config_temporary=""
 current_temporary=""
@@ -37,6 +38,7 @@ Options:
   --agent-env PATH   Completed Agent environment file to validate and install.
   --agent-uid UID    Container UID allowed to use the socket (default: 10001).
   --start-agent      Pull and start the unified Agent runtime after installation.
+  --helper-only      Preserve the installed Agent deployment and update only the helper.
   -h, --help         Show this help.
 EOF
 }
@@ -110,6 +112,10 @@ while (($#)); do
             start_agent="true"
             shift
             ;;
+        --helper-only)
+            helper_only="true"
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -123,6 +129,7 @@ done
 [[ ${EUID} -eq 0 ]] || fail "run this installer as root with sudo"
 [[ -n "${config_source}" ]] || fail "--config is required; do not install the example unchanged"
 [[ "${start_agent}" != "true" || -n "${agent_env_source}" ]] || fail "--start-agent requires --agent-env"
+[[ "${helper_only}" != "true" || ( "${start_agent}" == "false" && -z "${agent_env_source}" ) ]] || fail "--helper-only cannot change the Agent runtime"
 [[ "${agent_uid}" =~ ^[0-9]+$ ]] || fail "--agent-uid must be a non-negative integer"
 ((agent_uid <= 4294967295)) || fail "--agent-uid is outside the supported range"
 
@@ -179,11 +186,13 @@ install -d -o root -g root -m 0755 "${AGENT_STACK_ROOT}" "${AGENT_CONFIG_ROOT}"
 
 [[ ! -L "${AGENT_COMPOSE_TARGET}" ]] || fail "refusing to replace a symlinked Agent Compose target"
 [[ ! -L "${AGENT_ENV_EXAMPLE_TARGET}" ]] || fail "refusing to replace a symlinked Agent environment example"
+if [[ "${helper_only}" != "true" ]]; then
 install -o root -g root -m 0644 "${source_root}/compose.yml" "${AGENT_COMPOSE_TARGET}"
 install -o root -g root -m 0600 "${source_root}/.env.example" "${AGENT_ENV_EXAMPLE_TARGET}"
 install -o root -g root -m 0700 "${source_root}/upgrade_agent.py" "${AGENT_UPDATER_TARGET}"
 install -o root -g root -m 0644 "${source_root}/frappe-agent-updater.service" "${AGENT_UPDATER_SERVICE_TARGET}"
 install -o root -g root -m 0644 "${source_root}/frappe-agent-updater.timer" "${AGENT_UPDATER_TIMER_TARGET}"
+fi
 
 if [[ -n "${agent_env_source}" ]]; then
     [[ ! -L "${AGENT_ENV_TARGET}" ]] || fail "refusing to replace a symlinked Agent environment target"

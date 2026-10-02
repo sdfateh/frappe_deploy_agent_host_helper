@@ -16,6 +16,7 @@ sites_path=""
 container_sites_path=""
 staging_path=""
 site_suffix=""
+required_apps="frappe"
 traefik_service=""
 db_password_file=""
 agent_env=""
@@ -49,6 +50,7 @@ Options:
   --container-sites-path PATH   Sites path inside backend (default shown above)
   --staging-path PATH           Shared staging directory (created if missing)
   --site-suffix DOMAIN          Allowed site suffix, for example kaleam.net
+  --required-apps CSV           Ordered apps for new sites (default: frappe)
   --traefik-service NAME        Traefik service, for example production-a@docker
   --db-password-file PATH       Existing root-owned mode-0600 password file
   --agent-env PATH              Completed Agent environment file (optional)
@@ -195,6 +197,7 @@ while (($#)); do
         --container-sites-path) container_sites_path="${2-}"; shift 2 ;;
         --staging-path) staging_path="${2-}"; shift 2 ;;
         --site-suffix) site_suffix="${2-}"; shift 2 ;;
+        --required-apps) required_apps="${2-}"; shift 2 ;;
         --traefik-service) traefik_service="${2-}"; shift 2 ;;
         --db-password-file) db_password_file="${2-}"; shift 2 ;;
         --agent-env) agent_env="${2-}"; shift 2 ;;
@@ -355,8 +358,9 @@ python3 - \
     "${compose_file}" "${backend_service}" "${sites_path}" \
     "${container_sites_path}" "${staging_path}" "${db_password_file}" \
     "${site_suffix}" "${traefik_service}" "${agent_uid}" \
-    "${allowed_operations_json}" "${allowed_suffixes_json}" <<'PY'
+    "${allowed_operations_json}" "${allowed_suffixes_json}" "${required_apps}" <<'PY'
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -364,8 +368,13 @@ from pathlib import Path
     helper_path, registry_path, bench_id, compose_file, backend_service,
     sites_path, container_sites_path, staging_path, password_file,
     suffix, traefik_service, agent_uid, allowed_operations_json,
-    allowed_suffixes_json,
+    allowed_suffixes_json, required_apps_csv,
 ) = sys.argv[1:]
+required_apps = required_apps_csv.split(",")
+if (not 1 <= len(required_apps) <= 32 or required_apps[0] != "frappe"
+    or len(set(required_apps)) != len(required_apps)
+    or any(not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", app) for app in required_apps)):
+    raise SystemExit("required apps must be unique app names starting with frappe")
 
 default_operations = [
     "site.create", "site.create_blank", "site.create_from_backup",
@@ -382,6 +391,7 @@ if not isinstance(suffixes, list) or not suffixes or any(not isinstance(item, st
     raise SystemExit("Controller allowed_site_suffixes policy is invalid")
 
 helper_bench = {
+    "required_apps": required_apps,
     "bench_id": bench_id,
     "compose_file": compose_file,
     "backend_service": backend_service,
@@ -397,6 +407,7 @@ helper_bench = {
     "concurrency_limit": 1,
 }
 registry_bench = {
+    "required_apps": required_apps,
     "bench_id": bench_id,
     "compose_file": compose_file,
     "backend_service": backend_service,
