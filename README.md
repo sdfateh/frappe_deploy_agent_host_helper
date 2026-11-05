@@ -45,8 +45,16 @@ real host location and `container_sites_path` at its in-container mount point.
 
 ### Simple setup (recommended)
 
-On the Controller, open the **Server Agent** record and click **Generate Install
-Token**. Then run its displayed command from this repository on the managed
+On the Controller, create a **Server Agent**, choose **Apply Setup Profile**,
+set the allowed domain suffixes, review and save the policy, then click
+**Generate Install Token**. The profiles are **Inventory and verification**,
+**Backup and verification**, and **Customer ERP creation**. The last requires
+`frappe`, `erpnext`, and `mos_pro` and permits blank creation, backup and verification;
+it grants no restore, reinstall, delete or data-update operation. Profiles never
+enable environment feature flags or change approval rules. New records default
+to verification only. Custom operation/app lists remain available.
+
+Run the displayed command from the reviewed `host_helper` checkout on the managed
 server:
 
 ```console
@@ -55,22 +63,60 @@ sudo ./setup.sh \
   --agent-id agent-01
 ```
 
-Paste the one-time token when prompted, select a Bench only if more than one is
-found, and enter the MariaDB root password. Setup creates an Ed25519 signing
-key, enrolls its public key over HTTPS, discovers Docker Compose, generates all policies, installs
-the Host Helper, and starts the unified Agent. You do not edit `.env`,
+Setup checks prerequisites and discovers the existing Bench before asking for
+the token. Select a Bench only if more than one is found. Paste the token,
+review one resolved configuration, and enter the MariaDB root password. Setup
+creates an Ed25519 signing key, enrolls its public key over HTTPS, generates all
+policies, installs the Host Helper, and starts the unified Agent. It checks the
+exact running image and health, then waits up to 120 seconds for signed Controller
+heartbeat and fresh, healthy Bench inventory with the expected required apps.
+Enable the Controller's `inventory` feature for this environment first.
+You do not edit `.env`,
 `host-helper.production.json`, or `benches.yaml`.
+
+Traefik discovery uses actual frontend service labels and file-provider arguments
+or environment. For static-file configurations or ambiguous ingress, specify the
+reviewed host directory/service with `--traefik-dynamic-config-path PATH` and
+`--traefik-service NAME@docker`. There is no hardcoded deployment directory.
+Automatic discovery refuses to omit Compose overlays: supply a reviewed complete
+Compose file through `--compose-file` for those installations.
 
 For automation, pass a root-owned mode-`0600` token file:
 
 ```console
 sudo ./setup.sh --controller https://controller-agent.example.com \
-  --agent-id agent-01 --enrollment-token-file /root/enrollment-token
+  --agent-id agent-01 --enrollment-token-file /root/enrollment-token --yes
 ```
 
-Check the installation with `sudo ./setup.sh doctor` or
+`--yes` accepts the displayed configuration for automation; ambiguity and failed
+validation still stop setup. Setup automatically runs diagnostics, so a separate
+doctor command is only needed for later troubleshooting. Use `sudo ./setup.sh doctor` or
 `sudo ./setup.sh doctor --json`. To repair the safe Traefik route-directory
 permission finding, run `sudo ./setup.sh doctor --fix`.
+
+### Interrupted setup and existing servers
+
+If setup fails, fix the reported cause and rerun the same command with the same
+Bench overrides. The private key and Controller/Agent binding survive under
+`/etc/frappe-agent/enrollment/<agent-id>/`, owned by root with directory mode
+`0700` and file mode `0600`. Tokens are never saved there. A signed status request
+refreshes the bootstrap policy without another token once enrollment succeeded,
+including when the original enrollment response was lost. A token is still
+required if the Controller never accepted enrollment. Changing the Controller,
+Agent identity or saved Bench target fails closed.
+
+After successful completion, repeating setup runs diagnostics without reinstalling
+services. A server with an existing identity but no setup journal is directed to
+the upgrade procedure. Setup never silently replaces an installed key. Preserve
+the protected enrollment journal in host recovery backups; it contains a private key.
+
+For normal upgrades, keep identity and persistent job state, verify the release,
+then use [Controller-managed image upgrades](../docs/AGENT_UPGRADES.md). Install a
+matching Helper release when required. DNS/S3 configuration and enrollment are
+initial setup tasks, not normal upgrade steps. Deploy and migrate the updated
+Controller before using this installer: bootstrap contract `1.1` adds required
+apps and the signed read-only `installation_status_route`; legacy bootstrap
+requests continue receiving contract `1.0`.
 
 ### Manual setup
 

@@ -16,8 +16,11 @@ sites_path=""
 container_sites_path=""
 staging_path=""
 site_suffix=""
-required_apps="frappe"
+required_apps=""
 traefik_service=""
+traefik_dynamic_config_path=""
+assume_yes="false"
+enrollment_dir=""
 db_password_file=""
 agent_env=""
 agent_uid="10001"
@@ -28,6 +31,7 @@ enrollment_token_file=""
 doctor_mode="false"
 doctor_json="false"
 doctor_fix="false"
+doctor_local_only="false"
 bootstrap_file=""
 discovery_file=""
 allowed_operations_json=""
@@ -50,8 +54,10 @@ Options:
   --container-sites-path PATH   Sites path inside backend (default shown above)
   --staging-path PATH           Shared staging directory (created if missing)
   --site-suffix DOMAIN          Allowed site suffix, for example kaleam.net
-  --required-apps CSV           Ordered apps for new sites (default: frappe)
+  --required-apps CSV           Explicit apps (must match Controller setup policy)
   --traefik-service NAME        Traefik service, for example production-a@docker
+  --traefik-dynamic-config-path PATH  Existing host file-provider directory
+  --yes                        Accept the displayed configuration for automation
   --db-password-file PATH       Existing root-owned mode-0600 password file
   --agent-env PATH              Completed Agent environment file (optional)
   --agent-uid UID               Agent container UID (default: 10001)
@@ -134,8 +140,10 @@ doctor() {
         fi
         check "Agent Compose configuration" docker compose \
             --env-file "${AGENT_ENV_TARGET}" --file "${AGENT_COMPOSE}" config --quiet
-        check "Agent containers" docker compose \
-            --env-file "${AGENT_ENV_TARGET}" --file "${AGENT_COMPOSE}" ps --status running --quiet
+        check "Agent runtime health and immutable image" python3 "${source_root}/diagnostics.py" runtime
+    fi
+    if [[ "${doctor_local_only}" != "true" ]]; then
+        check "Signed Controller heartbeat, inventory and policy" python3 "${source_root}/diagnostics.py" controller
     fi
     if ((failures)); then
         if [[ "${doctor_json}" == "true" ]]; then
@@ -189,6 +197,9 @@ prompt() {
 }
 
 while (($#)); do
+    if [[ "$1" == --* && "$1" != "--start-agent" && "$1" != "--yes" && "$1" != "--fix" && "$1" != "--json" && "$1" != "--help" ]]; then
+        (($# >= 2)) && [[ -n "${2}" && "${2}" != --* ]] || fail "$1 requires a value"
+    fi
     case "$1" in
         --bench-id) bench_id="${2-}"; shift 2 ;;
         --compose-file) compose_file="${2-}"; shift 2 ;;
@@ -199,6 +210,8 @@ while (($#)); do
         --site-suffix) site_suffix="${2-}"; shift 2 ;;
         --required-apps) required_apps="${2-}"; shift 2 ;;
         --traefik-service) traefik_service="${2-}"; shift 2 ;;
+        --traefik-dynamic-config-path) traefik_dynamic_config_path="${2-}"; shift 2 ;;
+        --yes) assume_yes="true"; shift ;;
         --db-password-file) db_password_file="${2-}"; shift 2 ;;
         --agent-env) agent_env="${2-}"; shift 2 ;;
         --agent-uid) agent_uid="${2-}"; shift 2 ;;
@@ -235,36 +248,90 @@ fi
 
 if [[ -n "${controller_url}" ]]; then
     [[ -n "${agent_id}" ]] || fail "--controller requires --agent-id from the Controller install command"
-    for command in openssl docker; do
-        command -v "${command}" >/dev/null 2>&1 || fail "required enrollment command is missing: ${command}"
+    for command in systemctl docker openssl flock groupadd getent sha256sum cmp cut tr mv ln sleep; do
+        command -v "${command}" >/dev/null 2>&1 || fail "required command is missing: ${command}"
     done
-    temporary_dir="$(mktemp -d /run/frappe-setup.XXXXXXXX)"
-    chmod 0700 "${temporary_dir}"
+    [[ -d /run/systemd/system ]] || fail "systemd is not running"
+    systemctl is-active --quiet docker.service || fail "docker.service must be active"
+    docker compose version >/dev/null || fail "Docker Compose plugin is required"
+    python3 -m pip --version >/dev/null || fail "python3-pip is required"
+    python3 -c 'import sys, venv; assert sys.version_info >= (3, 10)' || fail "Python 3.10+ with venv is required"
+    for asset in bootstrap.py diagnostics.py discover.py install.sh compose.yml .env.example requirements.txt VERSION __init__.py data_update_contract.py executor.py observability.py protocol.py server.py upgrade_agent.py frappe-host-helper.service frappe-agent-updater.service frappe-agent-updater.timer; do
+        [[ -f "${source_root}/${asset}" && ! -L "${source_root}/${asset}" ]] || fail "release is incomplete or unsafe: ${asset}"
+    done
+    exec 9>/run/frappe-agent-setup.lock
+    flock --nonblock 9 || fail "another setup is running"
+    exec 8>/run/frappe-agent-updater.lock
+    flock --nonblock 8 || fail "an Agent upgrade is running; retry setup when it finishes"
+    [[ "${agent_id}" =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]] || fail "Agent ID is invalid"
+    enrollment_dir="${AGENT_CONFIG_ROOT}/enrollment/${agent_id}"
+    if [[ -e "${AGENT_SIGNING_ROOT}/agent-signing-key.pem" && ! -f "${enrollment_dir}/identity.json" ]]; then
+        fail "this server already has an installed signing identity; use doctor or the upgrade procedure, not enrollment"
+    fi
+    [[ "${agent_uid}" == "10001" ]] || fail "the reviewed Agent Compose runs as UID 10001; use --agent-uid 10001"
+    if [[ -n "${db_password_file}" ]]; then
+        [[ "${db_password_file}" == /* && -f "${db_password_file}" && ! -L "${db_password_file}" && "$(stat -c '%u:%a' "${db_password_file}")" == "0:600" ]] || fail "database password file must be a root-owned mode-0600 absolute regular file"
+    fi
     bootstrap_args=(
         --controller "${controller_url}" --agent-id "${agent_id}"
-        --output "${temporary_dir}/signing"
+        --output "${enrollment_dir}"
     )
-    if [[ -n "${enrollment_token_file}" ]]; then
-        bootstrap_args+=(--token-file "${enrollment_token_file}")
+    # Keep identity durable; save the discovered target before token consumption.
+    python3 "${source_root}/bootstrap.py" "${bootstrap_args[@]}" --prepare-only
+    if [[ -e "${AGENT_SIGNING_ROOT}/agent-signing-key.pem" ]]; then
+        cmp -s "${AGENT_SIGNING_ROOT}/agent-signing-key.pem" "${enrollment_dir}/agent-signing-key.pem" || fail "installed signing identity differs; refusing setup"
     fi
-    python3 "${source_root}/bootstrap.py" "${bootstrap_args[@]}" >/dev/null
-    bootstrap_file="${temporary_dir}/signing/bootstrap.json"
+    [[ ! -L "${enrollment_dir}/plan.json" && ! -L "${enrollment_dir}/completed" ]] || fail "unsafe saved setup target"
+    if [[ -f "${enrollment_dir}/completed" ]]; then
+        python3 "${source_root}/bootstrap.py" "${bootstrap_args[@]}" >/dev/null
+        doctor
+        printf '\nExisting installation is ready. Use the upgrade procedure for release changes.\n'
+        exit 0
+    fi
+    if [[ -f "${enrollment_dir}/plan.json" ]]; then
+        # Preserve the selected target across retries; explicit overrides must
+        # still match the saved plan before enrollment or service changes.
+        eval "$(python3 - "${enrollment_dir}/plan.json" "${bench_id}" "${compose_file}" "${backend_service}" "${sites_path}" "${container_sites_path}" "${staging_path}" "${traefik_service}" "${traefik_dynamic_config_path}" <<'PY_RESUME'
+import json, shlex, sys
+saved = json.load(open(sys.argv[1]))
+keys = ("bench_id", "compose_file", "backend_service", "sites_path", "container_sites_path", "staging_path", "traefik_service", "traefik_dynamic_config_path")
+for key, override in zip(keys, sys.argv[2:]):
+    if not override:
+        print(f"{key}={shlex.quote(str(saved[key]))}")
+PY_RESUME
+)"
+    fi
+    temporary_dir="$(mktemp -d /run/frappe-setup.XXXXXXXX)"
+    chmod 0700 "${temporary_dir}"
     discovery_file="${temporary_dir}/discovery.json"
     discovery_args=(--output "${discovery_file}")
+    [[ -z "${bench_id}" ]] || discovery_args+=(--bench-id "${bench_id}")
     [[ -z "${compose_file}" ]] || discovery_args+=(--compose-file "${compose_file}")
     [[ -z "${backend_service}" ]] || discovery_args+=(--backend-service "${backend_service}")
     [[ -z "${sites_path}" ]] || discovery_args+=(--sites-path "${sites_path}")
     [[ -z "${container_sites_path}" ]] || discovery_args+=(--container-sites-path "${container_sites_path}")
     [[ -z "${staging_path}" ]] || discovery_args+=(--staging-path "${staging_path}")
     [[ -z "${traefik_service}" ]] || discovery_args+=(--traefik-service "${traefik_service}")
+    [[ -z "${traefik_dynamic_config_path}" ]] || discovery_args+=(--traefik-dynamic-config-path "${traefik_dynamic_config_path}")
     python3 "${source_root}/discover.py" "${discovery_args[@]}"
     eval "$(python3 - "${discovery_file}" <<'PY'
 import json, shlex, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
-for key in ("bench_id", "compose_file", "backend_service", "sites_path", "container_sites_path", "staging_path", "traefik_service"):
+for key in ("bench_id", "compose_file", "backend_service", "sites_path", "container_sites_path", "staging_path", "traefik_service", "traefik_dynamic_config_path"):
     print(f"{key}={shlex.quote(str(value[key]))}")
 PY
 )"
+    [[ ! -L "${enrollment_dir}/plan.json" && ! -L "${enrollment_dir}/completed" ]] || fail "unsafe saved setup target"
+    if [[ -f "${enrollment_dir}/plan.json" ]]; then
+        cmp -s "${enrollment_dir}/plan.json" "${discovery_file}" || fail "discovered target differs from saved setup; use the original target and overrides"
+    else
+        install -o root -g root -m 0600 "${discovery_file}" "${enrollment_dir}/plan.json"
+    fi
+    if [[ -n "${enrollment_token_file}" ]]; then
+        bootstrap_args+=(--token-file "${enrollment_token_file}")
+    fi
+    python3 "${source_root}/bootstrap.py" "${bootstrap_args[@]}" >/dev/null
+    bootstrap_file="${enrollment_dir}/bootstrap.json"
     site_suffix="$(python3 - "${bootstrap_file}" <<'PY'
 import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["policy"]["allowed_site_suffixes"][0])
@@ -280,9 +347,17 @@ import json, sys
 print(json.dumps(json.load(open(sys.argv[1], encoding="utf-8"))["policy"]["allowed_operations"], separators=(",", ":")))
 PY
 )"
+    policy_apps="$(python3 - "${bootstrap_file}" <<'PY_APPS'
+import json, sys
+print(",".join(json.load(open(sys.argv[1]))["policy"].get("required_apps", ["frappe"])))
+PY_APPS
+)"
+    [[ -z "${required_apps}" || "${required_apps}" == "${policy_apps}" ]] || fail "--required-apps must match Setup Required Apps on the Controller"
+    required_apps="${policy_apps}"
     start_agent="true"
 fi
 
+[[ -n "${required_apps}" ]] || required_apps="frappe"
 [[ -n "${bench_id}" ]] || prompt bench_id "Bench ID" "production-a"
 [[ -n "${compose_file}" ]] || prompt compose_file "Frappe Compose file"
 [[ -n "${backend_service}" ]] || prompt backend_service "Backend service" "backend"
@@ -291,6 +366,7 @@ fi
 [[ -n "${staging_path}" ]] || prompt staging_path "Shared staging directory" "/var/lib/frappe-agent/staging/${bench_id}"
 [[ -n "${site_suffix}" ]] || prompt site_suffix "Allowed site suffix (example: kaleam.net)"
 [[ -n "${traefik_service}" ]] || prompt traefik_service "Traefik frontend service" "${bench_id}@docker"
+[[ -n "${traefik_dynamic_config_path}" ]] || prompt traefik_dynamic_config_path "Traefik file-provider directory on host"
 
 [[ "${bench_id}" =~ ^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$ ]] || fail "bench ID must be lowercase letters, numbers, and hyphens"
 [[ "${backend_service}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]] || fail "backend service name is invalid"
@@ -311,6 +387,24 @@ PY
 [[ "${sites_path}" == /* && -d "${sites_path}" && ! -L "${sites_path}" ]] || fail "sites path must be an existing absolute directory, not a symlink"
 [[ "${container_sites_path}" == /* ]] || fail "container sites path must be absolute"
 [[ "${staging_path}" == /* ]] || fail "staging path must be absolute"
+
+[[ "${traefik_dynamic_config_path}" == /* && -d "${traefik_dynamic_config_path}" && ! -L "${traefik_dynamic_config_path}" ]] || fail "Traefik route directory must exist and not be a symlink"
+[[ "$(readlink -f -- "${traefik_dynamic_config_path}")" != / ]] || fail "Traefik route directory cannot be /"
+printf '\nReview managed-server configuration:\n  Bench: %s\n  Compose: %s\n  Backend: %s\n  Sites: %s\n  Staging: %s\n  Traefik service: %s\n  Traefik directory: %s\n  Required apps: %s\n  Suffixes: %s\n  Operations: %s\n' \
+    "${bench_id}" "${compose_file}" "${backend_service}" "${sites_path}" "${staging_path}" "${traefik_service}" "${traefik_dynamic_config_path}" "${required_apps}" "${allowed_suffixes_json:-${site_suffix}}" "${allowed_operations_json:-manual defaults}"
+if [[ "${assume_yes}" != "true" ]]; then
+    read -r -p "Install this configuration? [y/N]: " confirmation </dev/tty
+    [[ "${confirmation}" == y || "${confirmation}" == Y ]] || fail "configuration declined; enrollment identity retained for retry"
+fi
+# Acquire the immutable image before replacing installed policies or restarting services.
+if [[ -n "${bootstrap_file}" ]]; then
+    image_reference="$(python3 - "${bootstrap_file}" <<'PY_IMAGE'
+import json, sys
+print(json.load(open(sys.argv[1]))["image"]["reference"])
+PY_IMAGE
+)"
+    docker pull "${image_reference}" || fail "approved image cannot be pulled; fix registry access and rerun setup"
+fi
 
 compose_file="$(readlink -f -- "${compose_file}")"
 sites_path="$(readlink -f -- "${sites_path}")"
@@ -439,7 +533,7 @@ if [[ -n "${bootstrap_file}" ]]; then
     agent_env="${temporary_dir}/agent.env"
     python3 - \
         "${bootstrap_file}" "${discovery_file}" "${agent_env}" \
-        "${BENCH_REGISTRY}" "${site_suffix}" <<'PY'
+        "${BENCH_REGISTRY}" "${site_suffix}" "${traefik_dynamic_config_path}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -449,6 +543,7 @@ discovery = json.load(open(sys.argv[2], encoding="utf-8"))
 target = Path(sys.argv[3])
 registry = sys.argv[4]
 suffix = sys.argv[5]
+route_directory = sys.argv[6]
 
 def env(name, value):
     text = str(value)
@@ -462,7 +557,7 @@ values = [
     env("BENCH_REGISTRY_FILE", registry),
     env("BENCH_STAGING_ROOT", discovery["staging_path"]),
     env("BENCH_SITES_ROOT", discovery["sites_path"]),
-    env("TRAEFIK_DYNAMIC_CONFIG_PATH", "/deploy/proxy/simple-traefik/config/dynamic"),
+    env("TRAEFIK_DYNAMIC_CONFIG_PATH", route_directory),
     env("TRAEFIK_FRONTEND_SERVICE", discovery["traefik_service"]),
     env("STAGING_DIR", discovery["staging_path"]),
     env("AGENT_IMAGE_REPOSITORY", bootstrap["image"]["reference"].rsplit("@sha256:", 1)[0]),
@@ -499,9 +594,9 @@ if [[ -n "${bootstrap_file}" ]]; then
         target_name="${AGENT_SIGNING_ROOT}/${source_name}"
         [[ ! -L "${target_name}" ]] || fail "refusing to replace symlinked signing-key file: ${target_name}"
         if [[ -e "${target_name}" ]]; then
-            install -o root -g root -m 0600 "${target_name}" "${target_name}.previous"
+            cmp -s "${target_name}" "${enrollment_dir}/${source_name}" || fail "installed signing identity differs; refusing key replacement"
         fi
-        install -o root -g frappe-agent -m 0640 "${temporary_dir}/signing/${source_name}" "${target_name}"
+        install -o root -g frappe-agent -m 0640 "${enrollment_dir}/${source_name}" "${target_name}"
     done
     systemctl restart frappe-agent-updater.timer
 fi
@@ -509,6 +604,17 @@ fi
 if [[ "${start_agent}" == "true" ]]; then
     docker compose --env-file /etc/frappe-agent/agent.env --file "${AGENT_COMPOSE}" \
         up --detach --wait --wait-timeout 120
+fi
+
+if [[ "${start_agent}" == "true" ]]; then
+    doctor_local_only="true"
+    doctor
+    printf 'Waiting for signed Controller heartbeat and fresh Bench inventory...\n'
+    python3 "${source_root}/diagnostics.py" controller --timeout 120 || fail "installation is pending Controller readiness; configuration and identity retained, fix the reported checks and rerun setup"
+    if [[ -n "${bootstrap_file}" ]]; then
+        [[ ! -L "${enrollment_dir}/completed" ]] || fail "unsafe completion marker"
+        install -o root -g root -m 0600 /dev/null "${enrollment_dir}/completed"
+    fi
 fi
 
 printf '\nManaged server setup complete.\n'
