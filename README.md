@@ -47,10 +47,9 @@ real host location and `container_sites_path` at its in-container mount point.
 
 On the Controller, create a **Server Agent**, choose **Apply Setup Profile**,
 set the allowed domain suffixes, review and save the policy, then click
-**Generate Install Token**. The profiles are **Inventory and verification**,
-**Backup and verification**, and **Customer ERP creation**. The last requires
+**Generate Install Token**. The standard profile requires
 `frappe`, `erpnext`, and `mos_pro` and permits blank creation, backup and verification;
-it grants no restore, reinstall, delete or data-update operation. Profiles never
+it grants no restore, reinstall, delete or data-update operation. The profile never
 enable environment feature flags or change approval rules. New records default
 to verification only. Custom operation/app lists remain available.
 
