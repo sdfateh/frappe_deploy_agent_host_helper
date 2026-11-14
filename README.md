@@ -64,7 +64,11 @@ sudo ./setup.sh \
 ```
 
 Setup checks prerequisites and discovers the existing Bench before asking for
-the token. Select a Bench only if more than one is found. Paste the token,
+the token. It reports the systemd, Docker daemon and Compose, Python and virtual
+environment, and release-file checks; it stops with an error if a check fails.
+It does not install missing prerequisites. Controller connectivity is checked
+during enrollment, and registry access is checked when the Agent image is pulled.
+Select a Bench only if more than one is found. Paste the token,
 review one resolved configuration, and enter the MariaDB root password. Setup
 creates an Ed25519 signing key, enrolls its public key over HTTPS, generates all
 policies, installs the Host Helper, and starts the unified Agent. It checks the

@@ -248,17 +248,26 @@ fi
 
 if [[ -n "${controller_url}" ]]; then
     [[ -n "${agent_id}" ]] || fail "--controller requires --agent-id from the Controller install command"
+    printf 'Checking managed-server prerequisites...\n'
     for command in systemctl docker openssl flock groupadd getent sha256sum cmp cut tr mv ln sleep; do
         command -v "${command}" >/dev/null 2>&1 || fail "required command is missing: ${command}"
     done
     [[ -d /run/systemd/system ]] || fail "systemd is not running"
     systemctl is-active --quiet docker.service || fail "docker.service must be active"
-    docker compose version >/dev/null || fail "Docker Compose plugin is required"
-    python3 -m pip --version >/dev/null || fail "python3-pip is required"
-    python3 -c 'import sys, venv; assert sys.version_info >= (3, 10)' || fail "Python 3.10+ with venv is required"
+    docker info >/dev/null 2>&1 || fail "Docker daemon is not responding; check Docker service and configuration"
+    docker compose version >/dev/null 2>&1 || fail "Docker Compose plugin is required"
+    printf 'OK    systemd, Docker daemon and Compose\n'
+    python3 -m pip --version >/dev/null 2>&1 || fail "python3-pip is required"
+    python3 -c 'import sys, venv; assert sys.version_info >= (3, 10)' 2>/dev/null || fail "Python 3.10+ with venv is required"
+    temporary_dir="$(mktemp -d /run/frappe-setup.XXXXXXXX)"
+    chmod 0700 "${temporary_dir}"
+    python3 -m venv "${temporary_dir}/venv-check" >/dev/null 2>&1 || fail "Python cannot create a virtual environment with pip; install the Python venv package"
+    "${temporary_dir}/venv-check/bin/python" -m pip --version >/dev/null 2>&1 || fail "Python virtual environment has no working pip; install the Python venv package"
+    printf 'OK    Python 3.10+, pip and virtual environment\n'
     for asset in bootstrap.py diagnostics.py discover.py install.sh compose.yml .env.example requirements.txt VERSION __init__.py data_update_contract.py executor.py observability.py protocol.py server.py upgrade_agent.py frappe-host-helper.service frappe-agent-updater.service frappe-agent-updater.timer; do
         [[ -f "${source_root}/${asset}" && ! -L "${source_root}/${asset}" ]] || fail "release is incomplete or unsafe: ${asset}"
     done
+    printf 'OK    complete Host Helper release\n'
     exec 9>/run/frappe-agent-setup.lock
     flock --nonblock 9 || fail "another setup is running"
     exec 8>/run/frappe-agent-updater.lock
@@ -301,8 +310,6 @@ for key, override in zip(keys, sys.argv[2:]):
 PY_RESUME
 )"
     fi
-    temporary_dir="$(mktemp -d /run/frappe-setup.XXXXXXXX)"
-    chmod 0700 "${temporary_dir}"
     discovery_file="${temporary_dir}/discovery.json"
     discovery_args=(--output "${discovery_file}")
     [[ -z "${bench_id}" ]] || discovery_args+=(--bench-id "${bench_id}")
